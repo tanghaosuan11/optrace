@@ -29,6 +29,7 @@ import { useNavigation } from "./hooks/useNavigation";
 import { useConditionScan } from "./hooks/useConditionScan";
 import { useBreakpoints } from "./hooks/useBreakpoints";
 import { useTabSync } from "./hooks/useTabSync";
+import { useFourbyteResolver } from "./hooks/useFourbyteResolver";
 
 
 function App() {
@@ -104,6 +105,7 @@ function App() {
   const { runConditionScan } = useConditionScan(conditionHitSetRef);
   const { handleBreakOpcodesChange, handleToggleBreakpoint } = useBreakpoints(breakOpcodesRef, breakpointPcsRef);
   useTabSync(activeTabRef);
+  useFourbyteResolver();
 
   // ── Store-writing helpers (替代已删除的 useState setters) ────
   const setActiveTab = useCallback((v: string) => storeSync({ activeTab: v }), []);
@@ -122,10 +124,7 @@ function App() {
     storeSync({ currentStepIndex: v });
   }, []);
   const setStepCount = useCallback((v: number) => {
-    storeSync({
-      stepCount: v,
-      executedOpcodeSet: new Set(opcodeIndexRef.current.keys()),
-    });
+    storeSync({ stepCount: v });
     // 步数 <= 阈值时一次性预取全量数据，之后 applyStep 直接读缓存
     const threshold = fullDataThresholdRef.current;
     if (threshold > 0 && v <= threshold) {

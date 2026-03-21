@@ -118,13 +118,13 @@ function CalldataPopover({ input }: { input: string }) {
   );
 }
 
-function getFnLabel(input?: string): string | null {
+function getFnLabel(input?: string, resolvedFns?: Record<string, string>): string | null {
   if (!input) return null;
   const hex = input.startsWith('0x') ? input.slice(2) : input;
   if (hex.length < 8) return null;
   const selector = '0x' + hex.slice(0, 8).toLowerCase();
   const db = fourbyteDb as Record<string, { fn?: string; ev?: string } | null>;
-  return db[selector]?.fn ?? getUserFn(selector) ?? ('0x' + hex.slice(0, 8));
+  return db[selector]?.fn ?? getUserFn(selector) ?? resolvedFns?.[selector] ?? ('0x' + hex.slice(0, 8));
 }
 
 // ── node row ──────────────────────────────────────────────────────────────────
@@ -143,6 +143,7 @@ interface NodeRowProps {
   onNavigateTo?: (stepIndex: number, frameId: string) => void;
   showGas: boolean;
   txGasUsed?: bigint;
+  resolvedFns: Record<string, string>;
 }
 
 /** Renders the row-number cell + depth guide columns (vertical bars) */
@@ -168,9 +169,9 @@ function RowPrefix({ rowIndex, depth }: { rowIndex: number | string; depth: numb
   );
 }
 
-function NodeRow({ node, rowIndex, isCollapsed, isActive, isActiveEvent, hoveredAddr: _hoveredAddr, onHoverAddr, onToggle, onSeekTo, onSelectFrame, onNavigateTo, showGas, txGasUsed }: NodeRowProps) {
+function NodeRow({ node, rowIndex, isCollapsed, isActive, isActiveEvent, hoveredAddr: _hoveredAddr, onHoverAddr, onToggle, onSeekTo, onSelectFrame, onNavigateTo, showGas, txGasUsed, resolvedFns }: NodeRowProps) {
   if (node.type === 'frame') {
-    const fnLabel = getFnLabel(node.input);
+    const fnLabel = getFnLabel(node.input, resolvedFns);
     const isCreateType = node.callType === 'create' || node.callType === 'create2';
     const targetAddr = (node.target ?? node.address)?.toLowerCase() ?? null;
     const gasDisplay = node.depth === 1 && txGasUsed != null
@@ -381,6 +382,9 @@ export function CallTreeViewer({ onSeekTo, onSelectFrame, onNavigateTo }: CallTr
   const [scrollTop, setScrollTop] = useState(0);
   const scrollToContextId = useRef<number | null>(null);
 
+  // 远端查询结果由 useFourbyteResolver hook 写入 store，此处直接读取
+  const resolvedFns = useDebugStore((s) => s.resolvedFnCache);
+
   const handleHoverAddr = (addr: string | null) => {
     setHoveredAddr(addr);
     setGlobalAddrHighlight(addr);
@@ -568,6 +572,7 @@ export function CallTreeViewer({ onSeekTo, onSelectFrame, onNavigateTo }: CallTr
                 onNavigateTo={onNavigateTo}
                 showGas={showGas}
                 txGasUsed={txGasUsed}
+                resolvedFns={resolvedFns}
               />
             </div>
           ))}

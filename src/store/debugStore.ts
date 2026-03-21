@@ -46,6 +46,8 @@ export interface PlaybackSlice {
   callTreeNodes: CallTreeNode[];
   // 已执行过的 opcode 字节集合（用于 OpcodeViewer 过滤）
   executedOpcodeSet: Set<number>;
+  // 4byte 远程查询结果缓存（selector → 函数名）
+  resolvedFnCache: Record<string, string>;
 }
 
 const initialPlayback: PlaybackSlice = {
@@ -70,6 +72,7 @@ const initialPlayback: PlaybackSlice = {
   hasCallFrames: false,
   callTreeNodes: [],
   executedOpcodeSet: new Set<number>(),
+  resolvedFnCache: {},
 };
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

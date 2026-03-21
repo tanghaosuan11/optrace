@@ -21,8 +21,26 @@ export type { LogEntry, MemoryPatch, MemorySnapshot, ReturnDataEntry, StorageCha
 // 缓存收到的 FrameEnter，等 ContractSource 到来时填充到 CallFrame
 const pendingFrameEnters = new Map<number, Record<string, unknown>>();
 
+// contextId → CallFrame 快速查找表，替代 O(n) 的 .find()
+const _frameByCtx = new Map<number, CallFrame>();
+
+// bytecode hash → 反汇编结果缓存，避免同一合约重复 disassemble
+const _disasmCache = new Map<string, Opcode[]>();
+
+function _hashBytecode(bytes: Uint8Array): string {
+    // FNV-1a 32-bit
+    let h = 0x811c9dc5;
+    for (let i = 0; i < bytes.length; i++) {
+        h ^= bytes[i];
+        h = Math.imul(h, 0x01000193);
+    }
+    return `${bytes.length}:${(h >>> 0).toString(36)}`;
+}
+
 export function resetPendingFrameEnters() {
     pendingFrameEnters.clear();
+    _frameByCtx.clear();
+    _disasmCache.clear();
 }
 
 // ─── 节流：setCallFrames 最多每 200ms 触发一次 ─────────────────────────────────
@@ -65,18 +83,15 @@ export function handleStepBatch(
         oarr.push(i);
     }
 
-    // 每跨越一个 500 步边界才更新 stepCount，减少 React 重渲染
-    if (Math.floor(prevCount / 500) !== Math.floor(newCount / 500) || prevCount === 0) {
+    // 每跨越 5000 步边界才更新 stepCount，减少 React 重渲染（最终精确值由 Finished 补齐）
+    if (Math.floor(prevCount / 5000) !== Math.floor(newCount / 5000) || prevCount === 0) {
         context.setStepCount(newCount);
     }
 
     // 第一批数据时，检查是否可以应用第一步
     if (prevCount === 0 && steps.length > 0) {
         const firstStep = steps[0];
-        const matchingFrame = context.callFramesRef.current.find(
-            f => f.contextId === firstStep.contextId
-        );
-        if (matchingFrame) {
+        if (_frameByCtx.has(firstStep.contextId)) {
             context.applyStep(0);
         }
     }
@@ -101,16 +116,20 @@ export function handleContractSource(
     // );
 
 
-    const disassembleResult = disassemble(bytecode);
-    const opcodes: Opcode[] = disassembleResult.map((instr) => ({
-        pc: instr.pc,
-        name: instr.name,
-        data: instr.data,
-        gas: undefined,
-        category: instr.category,
-        warning: instr.warning,
-        isMetadata: instr.isMetadata,
-    }));
+    const bcKey = _hashBytecode(bytecode);
+    let opcodes = _disasmCache.get(bcKey);
+    if (!opcodes) {
+        opcodes = disassemble(bytecode).map((instr) => ({
+            pc: instr.pc,
+            name: instr.name,
+            data: instr.data,
+            gas: undefined,
+            category: instr.category,
+            warning: instr.warning,
+            isMetadata: instr.isMetadata,
+        }));
+        _disasmCache.set(bcKey, opcodes);
+    }
 
     const newFrame: CallFrame = {
         id: `frame-${contextId}`,
@@ -143,7 +162,8 @@ export function handleContractSource(
         pendingFrameEnters.delete(contextId);
     }
 
-    context.callFramesRef.current = [...context.callFramesRef.current, newFrame];
+    context.callFramesRef.current.push(newFrame);
+    _frameByCtx.set(contextId, newFrame);
     scheduleCallFramesFlush(context);
 
     // 如果还没有开始播放，检查是否可以应用某一步
@@ -152,14 +172,12 @@ export function handleContractSource(
         context.allStepsRef.current.length > 0
     ) {
         const firstValidIndex = context.allStepsRef.current.findIndex(step =>
-            context.callFramesRef.current.some(f => f.contextId === step.contextId)
+            _frameByCtx.has(step.contextId)
         );
         if (firstValidIndex >= 0) {
             const step = context.allStepsRef.current[firstValidIndex];
-            const frame = context.callFramesRef.current.find(
-                f => f.contextId === step.contextId
-            );
-            context.setActiveTab(frame!.id);
+            const frame = _frameByCtx.get(step.contextId)!;
+            context.setActiveTab(frame.id);
             context.applyStep(firstValidIndex);
         } else {
             context.setActiveTab(newFrame.id);
@@ -182,7 +200,7 @@ export function handleContextUpdateAddress(
         .map(b => b.toString(16).padStart(2, '0'))
         .join('');
 
-    const frame = context.callFramesRef.current.find(f => f.contextId === contextId);
+    const frame = _frameByCtx.get(contextId);
     if (frame) {
         frame.address = address;
         scheduleCallFramesFlush(context);
@@ -212,7 +230,7 @@ export function handleLogs(
             contextId: contextId,
         };
 
-        const frame = context.callFramesRef.current.find(f => f.contextId === contextId);
+        const frame = _frameByCtx.get(contextId);
         if (frame) {
             frame.logs.push(logEntry);
             scheduleCallFramesFlush(context);
@@ -227,7 +245,7 @@ export function handleLogs(
  */
 export function handleMemoryUpdate(
     body: Uint8Array,
-    context: MessageHandlerContext
+    // context: MessageHandlerContext
 ) {
     // return;
     const dv = new DataView(body.buffer, body.byteOffset, body.byteLength);
@@ -253,7 +271,7 @@ export function handleMemoryUpdate(
         data: new Uint8Array(memoryData),  // 复制一份，避免引用问题
     };
 
-    const frame = context.callFramesRef.current.find(f => f.contextId === contextId);
+    const frame = _frameByCtx.get(contextId);
     if (frame) {
         frame.memoryPatches.push(patch);
     }
@@ -284,7 +302,7 @@ export function handleReturnData(
         data: dataHex,
     };
 
-    const frame = context.callFramesRef.current.find(f => f.contextId === contextId);
+    const frame = _frameByCtx.get(contextId);
     if (frame) {
         frame.returnDataList.push(entry);
         scheduleCallFramesFlush(context);
@@ -297,7 +315,7 @@ export function handleReturnData(
  */
 export function handleStorageChange(
     body: Uint8Array,
-    context: MessageHandlerContext
+    // context: MessageHandlerContext
 ) {
 
     const dv = new DataView(body.buffer, body.byteOffset, body.byteLength);
@@ -314,7 +332,7 @@ export function handleStorageChange(
 
     const entry: StorageChangeEntry = {isRead, storageType, stepIndex, contextId, address, key, hadValue, newValue };
 
-    const frame = context.callFramesRef.current.find(f => f.contextId === contextId);
+    const frame = _frameByCtx.get(contextId);
     if (frame) {
         frame.storageChanges.push(entry);
         // 不触发 React 重渲染，播放时前端会直接读 ref
@@ -452,7 +470,8 @@ export function handleMessage(
             break;
 
         case MsgType.StorageChange:
-            handleStorageChange(body, context);
+            // handleStorageChange(body, context);
+            handleStorageChange(body);
             break;
 
         case MsgType.FrameExit: {
@@ -465,7 +484,7 @@ export function handleMessage(
             const exitOutputLen = exitDv.getUint32(12, false);
             const exitOutputBytes = body.slice(16, 16 + exitOutputLen);
             const exitOutput = '0x' + Array.from(exitOutputBytes).map(b => b.toString(16).padStart(2, '0')).join('');
-            const exitFrame = context.callFramesRef.current.find(f => f.contextId === exitFrameId);
+            const exitFrame = _frameByCtx.get(exitFrameId);
             if (exitFrame) {
                 exitFrame.exitCode = exitResult;
                 exitFrame.success = exitSuccess;
@@ -484,7 +503,7 @@ export function handleMessage(
             const sdTarget = '0x' + Array.from(body.slice(22, 42)).map(b => b.toString(16).padStart(2, '0')).join('');
             const sdValueBytes = body.slice(42, 74);
             const sdValue = '0x' + Array.from(sdValueBytes).map(b => b.toString(16).padStart(2, '0')).join('');
-            const sdFrame = context.callFramesRef.current.find(f => f.contextId === sdFrameId);
+            const sdFrame = _frameByCtx.get(sdFrameId);
             if (sdFrame) {
                 sdFrame.selfdestructContract = sdContract;
                 sdFrame.selfdestructTarget = sdTarget;
@@ -496,7 +515,6 @@ export function handleMessage(
 
         case MsgType.FrameEnter: {
             const frameInfo = JSON.parse(new TextDecoder().decode(body));
-            console.log('[FrameEnter] frame_id=', frameInfo.frame_id, ' kind=', frameInfo.kind, ' raw=', frameInfo);
             pendingFrameEnters.set(frameInfo.frame_id as number, frameInfo);
             break;
         }
@@ -521,7 +539,12 @@ export function handleMessage(
                 context.allStepsRef.current,
                 context.callFramesRef.current
             );
-            useDebugStore.getState().sync({ callTreeNodes: [...context.callTreeRef.current] });
+            // 一次性计算 executedOpcodeSet，避免流式阶段反复创建 Set
+            const executedOpcodeSet = new Set(context.opcodeIndex.current.keys());
+            useDebugStore.getState().sync({
+                callTreeNodes: [...context.callTreeRef.current],
+                executedOpcodeSet,
+            });
             // 强制同步最终状态到 React
             context.setCallFrames([...context.callFramesRef.current]);
             const totalSteps = context.allStepsRef.current.length;

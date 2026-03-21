@@ -525,7 +525,7 @@ export function DebugToolbar({
               + Add
             </Button>
             <Button size="sm" variant="default" className="h-5 px-2 text-[10px] bg-orange-500 hover:bg-orange-600 text-white font-semibold" onClick={() => onStartDebug?.()} title="重跑">
-              ↺ 重跑
+              ↺ ForkRun
             </Button>
           </div>
           {forkPatches.length > 0 && (

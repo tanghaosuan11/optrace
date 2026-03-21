@@ -171,7 +171,8 @@ export async function resetAllAction(deps: ResetAllDeps) {
   // 4. 恢复配置（config 不随 reset 清空）
   useDebugStore.getState().sync({ config });
 
-  // 5. 清空 App.tsx 里的 ref
+  // 5. 清空 App.tsx 里的 ref + 消息处理器缓存
+  resetPendingFrameEnters();
   deps.allStepsRef.current = [];
   deps.callFramesRef.current = [];
   deps.callTreeRef.current = [];
