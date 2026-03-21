@@ -9,7 +9,7 @@
   <a href="README.zh.md">中文文档</a>
 </p>
 
-<!-- ![OpTrace Demo](./doc/demo.gif) -->
+![OpTrace Demo](https://github.com/user-attachments/assets/67558e35-7b50-429b-b5f1-ef09683cd5b8)
 
 > **Note:** This is a personal project with many features. Not all functionality has been fully tested — results may not always be correct.
 

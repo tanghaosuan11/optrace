@@ -1,12 +1,10 @@
-//! 条件断点全量扫描
-//!
-//! 对 trace 进行并行扫描，返回命中条件组的步骤列表。
+// 条件断点全量扫描
+// 对 trace 进行并行扫描，返回命中条件组的步骤列表。
 
 use super::debug_session;
 use revm::primitives::U256;
 use serde::{Deserialize, Serialize};
 
-// ── 扫描类型 ──────────────────────────────────────────────────────────────────
 
 /// 单条条件断点
 #[derive(Deserialize)]

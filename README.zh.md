@@ -9,7 +9,7 @@
   <a href="README.md">English</a>
 </p>
 
-<!-- ![OpTrace Demo](./doc/demo.gif) -->
+![OpTrace Demo](https://github.com/user-attachments/assets/67558e35-7b50-429b-b5f1-ef09683cd5b8)
 
 > **注意：** 这是一个个人项目，功能较多，未来得及测试完所有功能，不保证结果正确。
 
