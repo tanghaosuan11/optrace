@@ -6,6 +6,7 @@
 import { load, type Store } from "@tauri-apps/plugin-store";
 
 // ── 内置脚本（?raw import） ───────────────────────────────────
+import guideCode from "./analysis-scripts/guide.js?raw";
 import gasTopCode from "./analysis-scripts/gas-top.js?raw";
 import sstoreSummaryCode from "./analysis-scripts/sstore-summary.js?raw";
 import opcodeFreqCode from "./analysis-scripts/opcode-freq.js?raw";
@@ -18,14 +19,17 @@ export interface ScriptEntry {
   code: string;
   readonly: boolean;
   updatedAt: number;
+  /** If true, the Run button is disabled for this entry */
+  isGuide?: boolean;
 }
 
 export const BUILTIN_SCRIPTS: ScriptEntry[] = [
-  { id: "builtin:gas-top",        name: "Gas 消耗 Top 20",    code: gasTopCode,        readonly: true, updatedAt: 0 },
-  { id: "builtin:sstore-summary", name: "SSTORE 操作汇总",    code: sstoreSummaryCode,  readonly: true, updatedAt: 0 },
-  { id: "builtin:opcode-freq",    name: "Opcode 频率统计",    code: opcodeFreqCode,     readonly: true, updatedAt: 0 },
-  { id: "builtin:call-summary",   name: "CALL 调用统计",      code: callSummaryCode,    readonly: true, updatedAt: 0 },
-  { id: "builtin:log-summary",    name: "LOG 事件汇总",       code: logSummaryCode,     readonly: true, updatedAt: 0 },
+  { id: "builtin:guide",          name: "📖 Guide",           code: guideCode,          readonly: true, updatedAt: 0, isGuide: true },
+  { id: "builtin:gas-top",        name: "Gas Cost Top 20",    code: gasTopCode,          readonly: true, updatedAt: 0 },
+  { id: "builtin:sstore-summary", name: "SSTORE Summary",     code: sstoreSummaryCode,   readonly: true, updatedAt: 0 },
+  { id: "builtin:opcode-freq",    name: "Opcode Frequency",   code: opcodeFreqCode,      readonly: true, updatedAt: 0 },
+  { id: "builtin:call-summary",   name: "Call Summary",       code: callSummaryCode,     readonly: true, updatedAt: 0 },
+  { id: "builtin:log-summary",    name: "Log Summary",        code: logSummaryCode,      readonly: true, updatedAt: 0 },
 ];
 
 // ── Tauri Store 单例 ─────────────────────────────────────────

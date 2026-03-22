@@ -120,7 +120,7 @@ pub struct AnalysisCancelFlag(pub Arc<AtomicBool>);
 #[tauri::command]
 async fn run_analysis(
     script: String,
-    opcodes: Option<Vec<String>>,
+    filters: Option<analysis::RawFilters>,
     state: tauri::State<'_, op_trace::DebugSessionState>,
     cancel_flag: tauri::State<'_, AnalysisCancelFlag>,
 ) -> Result<serde_json::Value, String> {
@@ -133,13 +133,14 @@ async fn run_analysis(
 
     let session_arc = Arc::clone(&state.0);
     let cancelled = Arc::clone(&cancel_flag.0);
+    let raw_filters = filters.unwrap_or_default();
     let (tx, rx) = std::sync::mpsc::channel::<Result<serde_json::Value, String>>();
     std::thread::spawn(move || {
         let result = (|| -> Result<serde_json::Value, String> {
             let guard = session_arc.lock().map_err(|e| e.to_string())?;
             let session = guard.as_ref().ok_or("No debug session active")?;
             let t0 = std::time::Instant::now();
-            let res = analysis::run_analysis(session, &script, opcodes.as_deref(), Arc::clone(&cancelled))?;
+            let res = analysis::run_analysis(session, &script, raw_filters, Arc::clone(&cancelled))?;
             println!(
                 "[run_analysis] {} steps | {:.1}ms",
                 session.trace.len(),

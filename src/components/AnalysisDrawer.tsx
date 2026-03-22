@@ -17,6 +17,47 @@ import {
 
 const DEFAULT_SCRIPT = BUILTIN_SCRIPTS[0].code;
 
+// ── 脚本头部过滤器解析 ────────────────────────────────────────────────────────
+// 支持格式（写在脚本任意行注释里）：
+//   // @filter opcodes:   SSTORE, SLOAD
+//   // @filter contract:  0xA0b86991...
+//   // @filter target:    0x1234...
+//   // @filter frames:    1, 5, 10
+
+interface ScriptFilters {
+  opcodes?:    string[];
+  contracts?:  string[];
+  targets?:    string[];
+  frames?:     number[];
+  /** [from, to] 全局步骤下标范围（含两端） */
+  step_range?: [number, number];
+}
+
+function parseScriptFilters(script: string): ScriptFilters | null {
+  const filters: ScriptFilters = {};
+  let found = false;
+
+  for (const raw of script.split("\n")) {
+    const m = raw.match(/^\/\/\s*@filter\s+(\w+)\s*:\s*(.+)/);
+    if (!m) continue;
+    found = true;
+    const key = m[1].toLowerCase();
+    const val = m[2].trim();
+
+    if (key === "opcodes")  { filters.opcodes    = val.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean); }
+    if (key === "contract") { filters.contracts   = val.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean); }
+    if (key === "target")   { filters.targets     = val.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean); }
+    if (key === "frames")   { filters.frames      = val.split(",").map((s) => Number(s.trim())).filter((n) => !isNaN(n)); }
+    if (key === "steps") {
+      // 格式：1000-5000  或  1000, 5000
+      const rangeM = val.match(/^(\d+)\s*[-,]\s*(\d+)$/);
+      if (rangeM) filters.step_range = [Number(rangeM[1]), Number(rangeM[2])];
+    }
+  }
+
+  return found ? filters : null;
+}
+
 export function AnalysisDrawer() {
   const isOpen = useDebugStore((s) => s.isAnalysisOpen);
   const stepCount = useDebugStore((s) => s.stepCount);
@@ -36,8 +77,8 @@ export function AnalysisDrawer() {
   const [elapsedMs, setElapsedMs] = useState<number | null>(null);
   const [dirty, setDirty] = useState(false);
 
-  const [opcodeFilter, setOpcodeFilter] = useState("");
   const [pinned, setPinned] = useState(false);
+  const isGuide = scripts.find((s) => s.id === activeId)?.isGuide ?? false;
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
   const runningRef = useRef(false);
 
@@ -137,6 +178,7 @@ export function AnalysisDrawer() {
 
   const handleRun = useCallback(async () => {
     if (runningRef.current) return;
+    if (isGuide) return;
     if (!stepCount) {
       toast.error("No debug session active");
       return;
@@ -155,10 +197,8 @@ export function AnalysisDrawer() {
     const t0 = performance.now();
 
     try {
-      const opcodes = opcodeFilter.trim()
-        ? opcodeFilter.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean)
-        : null;
-      const res = await invoke<unknown>("run_analysis", { script, opcodes });
+      const filters = parseScriptFilters(script);
+      const res = await invoke<unknown>("run_analysis", { script, filters });
       const ms = performance.now() - t0;
       setElapsedMs(Math.round(ms));
       setResult(JSON.stringify(res, null, 2));
@@ -170,7 +210,7 @@ export function AnalysisDrawer() {
       runningRef.current = false;
       setIsRunning(false);
     }
-  }, [code, stepCount, opcodeFilter]);
+  }, [code, stepCount]);
 
   const handleStop = useCallback(async () => {
     try {
@@ -280,15 +320,6 @@ export function AnalysisDrawer() {
                 {stepCount > 0 ? `${stepCount.toLocaleString()} steps` : "no session"}
               </span>
               <div className="ml-auto flex items-center gap-1">
-                {/* Opcode filter */}
-                <input
-                  type="text"
-                  value={opcodeFilter}
-                  onChange={(e) => setOpcodeFilter(e.target.value)}
-                  placeholder="Filter: SSTORE,SLOAD"
-                  className="h-5 px-1.5 text-[10px] font-mono bg-muted border border-border rounded w-36 placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
-                  title="Only inject steps matching these opcodes (comma-separated names or hex, e.g. SSTORE,0x55)"
-                />
                 {/* Save */}
                 <button
                   onClick={handleSave}
@@ -302,9 +333,9 @@ export function AnalysisDrawer() {
                 {/* Run */}
                 <button
                   onClick={handleRun}
-                  disabled={isRunning || !stepCount}
+                  disabled={isRunning || !stepCount || isGuide}
                   className="flex items-center gap-1 h-5 px-1.5 text-[10px] font-medium rounded bg-green-600 text-white hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                  title="Run (Ctrl+Enter)"
+                  title={isGuide ? "Guide — not executable" : "Run (Ctrl+Enter)"}
                 >
                   {isRunning ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <Play className="h-2.5 w-2.5" />}
                   Run

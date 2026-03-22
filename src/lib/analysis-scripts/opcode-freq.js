@@ -1,5 +1,6 @@
-// Opcode 频率统计
-// 按 opcode 类型分组统计出现次数和总 gas
+// Opcode Frequency
+// Group all steps by opcode, counting occurrences and total gas.
+// Results are sorted by total gas descending.
 const stats = {};
 for (const s of trace) {
   if (!stats[s.opcode]) stats[s.opcode] = { count: 0, gas: 0 };
