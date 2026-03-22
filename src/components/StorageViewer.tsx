@@ -220,11 +220,8 @@ export function StorageViewer() {
                       vRow.index % 2 === 0 ? "bg-muted/30" : ""
                     }`}
                   >
-                    {/* 第一行: R标记 + key + type + 第三栏 */}
+                    {/* 第一行: key + type + 第三栏 */}
                     <div className="flex items-center leading-tight w-full overflow-hidden">
-                      {slot.isRead && (
-                        <span className="shrink-0 text-[9px] text-cyan-400/70" title="SLOAD">R</span>
-                      )}
                       {annotation ? (
                         <>
                           <span className="w-[10%] shrink-0 truncate text-muted-foreground" title={slot.key}>
@@ -245,8 +242,13 @@ export function StorageViewer() {
                     <div className="pl-6 leading-tight truncate text-muted-foreground text-center" title={slot.presentValue}>
                       {slot.presentValue}
                     </div>
-                    {/* ⊞ 绝对定位，垂直居中右侧 */}
-                    {!slot.isRead && slot.history.length > 0 && (
+                    {/* 右侧标记：read-only 显示 R，有写入历史显示 ⊞ */}
+                    {slot.isRead ? (
+                      <span
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-[10px] text-cyan-400/70 select-none"
+                        title="SLOAD (read-only)"
+                      >R</span>
+                    ) : slot.history.length > 0 && (
                       <Popover>
                         <PopoverTrigger asChild>
                           <span

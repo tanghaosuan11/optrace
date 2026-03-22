@@ -40,7 +40,10 @@ interface DebugToolbarProps {
   onStepBack: () => void;
   onDebugDump?: () => void;
   onBreakOpcodesChange: (opcodes: Set<number>) => void;
+  /** 进度条拖拽用，不记历史 */
   onSeekTo: (index: number) => void;
+  /** CallTree 节点点击用，记入导航历史 */
+  onSeekToWithHistory?: (index: number) => void;
   onSpeedChange: (speed: number) => void;
   onNavBack?: () => void;
   onNavForward?: () => void;
@@ -59,6 +62,7 @@ export function DebugToolbar({
   onDebugDump,
   onBreakOpcodesChange,
   onSeekTo,
+  onSeekToWithHistory,
   onSpeedChange,
   onNavBack,
   onNavForward,
@@ -614,7 +618,7 @@ export function DebugToolbar({
         <SheetTitle className="sr-only">Call Tree</SheetTitle>
         <div className="flex-1 min-h-0 overflow-hidden">
           <CallTreeViewer
-            onSeekTo={onSeekTo}
+            onSeekTo={onSeekToWithHistory ?? onSeekTo}
             onSelectFrame={onSelectFrame}
             onNavigateTo={onNavigateTo}
           />

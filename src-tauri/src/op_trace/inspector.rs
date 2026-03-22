@@ -394,7 +394,7 @@ where
             let is_transient = opcode == 0x5c;
             let storage_key = self.step_info.storage_key.unwrap_or_default();
             self.send_storage_change(
-                is_transient, false, frame_id, step_idx, address, storage_key, zero, *storage_data,
+                is_transient, true, frame_id, step_idx, address, storage_key, zero, *storage_data,
             );
         }
     }

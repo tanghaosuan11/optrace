@@ -319,6 +319,7 @@ function App() {
               onDebugDump={handleDebugDump}
               onBreakOpcodesChange={handleBreakOpcodesChange}
               onSeekTo={seekTo}
+              onSeekToWithHistory={seekToWithHistory}
               onSpeedChange={setPlaybackSpeed}
               onNavBack={navBack}
               onNavForward={navForward}
