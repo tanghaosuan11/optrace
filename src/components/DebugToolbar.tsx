@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
 import { Input } from "@/components/ui/input";
@@ -81,7 +81,7 @@ export function DebugToolbar({
   const isDebug = useDebugStore((s) => s.config.isDebug);
   const pauseConditions = useDebugStore((s) => s.condNodes);
   const hasCallTree = useDebugStore((s) => s.callTreeNodes.length > 0);
-  const [activeDrawer, setActiveDrawer] = useState<string | null>(null);
+  const isCallTreeOpen = useDebugStore((s) => s.isCallTreeOpen);
   const [showPauseOn, setShowPauseOn] = useState(false);
   const [showCond, setShowCond] = useState(false);
   const [showFork, setShowFork] = useState(false);
@@ -97,34 +97,6 @@ export function DebugToolbar({
   const [patchMemOffset, setPatchMemOffset] = useState("");
   const [patchMemVal, setPatchMemVal] = useState("");
 
-  // 快捷键：j=上一步, n=下一步, 空格=播放/暂停（仅 frame 页生效，DebugToolbar 本身在 frame 页才挂载）
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement).tagName;
-      if (tag === "INPUT" || tag === "TEXTAREA" || (e.target as HTMLElement).isContentEditable) return;
-      if (disabled) return;
-      if (e.key === "j") {
-        e.preventDefault();
-        onStepBack();
-      } else if (e.key === "k") {
-        e.preventDefault();
-        onStepInto();
-      } else if (e.key === " ") {
-        e.preventDefault();
-        onContinue();
-      } else if (e.key === "t") {
-        if (!hasCallTree) return;
-        e.preventDefault();
-        setActiveDrawer(v => v === "calltree" ? null : "calltree");
-      } else if (e.key === "l") {
-        if (disabled) return;
-        e.preventDefault();
-        useDebugStore.getState().sync({ isLogDrawerOpen: true });
-      }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [disabled, onStepBack, onStepInto, onContinue, hasCallTree]);
 
   return (
     <>
@@ -272,9 +244,9 @@ export function DebugToolbar({
       <div className="w-px h-6 bg-border mx-1" />
 
       <Button
-        variant={activeDrawer === "calltree" ? "secondary" : "ghost"}
+        variant={isCallTreeOpen ? "secondary" : "ghost"}
         size="sm"
-        onClick={() => setActiveDrawer(v => v === "calltree" ? null : "calltree")}
+        onClick={() => { const s = useDebugStore.getState(); s.sync({ isCallTreeOpen: !s.isCallTreeOpen }); }}
         className="h-6 px-2 text-[11px]"
         title="Call Tree"
         disabled={!hasCallTree}
@@ -586,7 +558,7 @@ export function DebugToolbar({
           <Button
             variant="ghost"
             size="icon"
-            className="h-6 w-6 flex-shrink-0"
+            className={`h-6 w-6 flex-shrink-0 transition-opacity ${!canNavBack ? "!opacity-20" : ""}`}
             disabled={!canNavBack}
             onClick={onNavBack}
             title="Navigate Back"
@@ -596,7 +568,7 @@ export function DebugToolbar({
           <Button
             variant="ghost"
             size="icon"
-            className="h-6 w-6 flex-shrink-0"
+            className={`h-6 w-6 flex-shrink-0 transition-opacity ${!canNavForward ? "!opacity-20" : ""}`}
             disabled={!canNavForward}
             onClick={onNavForward}
             title="Navigate Forward"
@@ -613,7 +585,7 @@ export function DebugToolbar({
       )}
 
     {/* Call Tree Sheet — 从底部弹出，占半屏 */}
-    <Sheet open={activeDrawer === "calltree"} onOpenChange={(o) => { if (!o) setActiveDrawer(null); }}>
+    <Sheet open={isCallTreeOpen} onOpenChange={(o) => { if (!o) useDebugStore.getState().sync({ isCallTreeOpen: false }); }}>
       <SheetContent side="bottom" className="h-[50vh] flex flex-col p-0 [&>button]:hidden border-t border-border shadow-[0_-4px_12px_rgba(0,0,0,0.18)]" aria-describedby={undefined}>
         <SheetTitle className="sr-only">Call Tree</SheetTitle>
         <div className="flex-1 min-h-0 overflow-hidden">

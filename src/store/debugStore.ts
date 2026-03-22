@@ -160,6 +160,7 @@ export interface UISlice {
   isAnalysisOpen: boolean;
   isBookmarksOpen: boolean;
   isCondListOpen: boolean;
+  isCallTreeOpen: boolean;
   isTestDialogOpen: boolean;
   testBytecode: string;
   testOpcodes: Array<{ pc: number; name: string; data?: string }>;
@@ -178,6 +179,7 @@ const initialUI: UISlice = {
   isAnalysisOpen: false,
   isBookmarksOpen: false,
   isCondListOpen: false,
+  isCallTreeOpen: false,
   isTestDialogOpen: false,
   testBytecode: "",
   testOpcodes: [],
@@ -211,7 +213,7 @@ export interface TxSlice {
 }
 
 const initialTx: TxSlice = {
-  tx: "",
+  tx: "0x68d251ca722d3949d453899b5b515b61b216c1eb726526fcbb7b95e186c54248",
   txData: null,
   blockData: null,
   isFetchingTx: false,

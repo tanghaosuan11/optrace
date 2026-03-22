@@ -15,17 +15,15 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useDebugStore } from "@/store/debugStore";
 import { getSelectedRpc } from "@/lib/rpcConfig";
 
-type Tool = "baseconv" | "gwei" | "keccak256" | "4byte" | "checksum" | "abi" | "slot" | "timestamp";
+type Tool = "conv" | "keccak256" | "4byte" | "checksum" | "abi" | "slot";
 
 const TOOLS: { id: Tool; label: string }[] = [
-  { id: "baseconv",  label: "BaseConv"  },
-  { id: "gwei",      label: "GweiConv"  },
+  { id: "conv",      label: "Conv"      },
   { id: "keccak256", label: "Keccak256" },
   { id: "4byte",     label: "4Byte"     },
   { id: "checksum",  label: "Checksum"  },
   { id: "abi",       label: "ABI"       },
   { id: "slot",      label: "SlotRead"  },
-  { id: "timestamp", label: "Timestamp" },
 ];
 
 function parseNumber(val: string): bigint | null {
@@ -48,20 +46,52 @@ function ResultBox({ value }: { value: string }) {
 // ── BaseConv ───────────────────────────────────────────────────────────────
 
 function BaseConvTool() {
-  const [input, setInput] = useState("");
-  const num = parseNumber(input);
+  // 记录当前正在编辑的进制和原始输入，其他栏位从解析结果派生
+  const [src, setSrc] = useState<{ base: number; raw: string } | null>(null);
+
+  const parsed = (() => {
+    if (!src?.raw.trim()) return null;
+    try {
+      const s = src.raw.trim();
+      if (src.base === 2)  return BigInt("0b" + s.replace(/^0b/i, ""));
+      if (src.base === 8)  return BigInt("0o" + s.replace(/^0o/i, ""));
+      if (src.base === 16) return BigInt("0x" + s.replace(/^0x/i, ""));
+      return BigInt(s);
+    } catch { return null; }
+  })();
+
+  const val = (base: number) => {
+    if (src?.base === base) return src.raw;
+    if (parsed === null) return "";
+    if (base === 2)  return parsed.toString(2);
+    if (base === 8)  return "0o" + parsed.toString(8);
+    if (base === 10) return parsed.toString(10);
+    return "0x" + parsed.toString(16).toLowerCase();
+  };
+
+  const rows = [
+    { base: 2,  ph: "1010" },
+    { base: 8,  ph: "377"  },
+    { base: 10, ph: "255"  },
+    { base: 16, ph: "ff"   },
+  ];
+
   return (
-    <div className="space-y-2">
-      <Input placeholder="0xff  ·  255  ·  ff" value={input}
-        onChange={(e) => setInput(e.target.value)} className="font-mono h-7 text-xs" autoFocus />
-      {num !== null ? (
-        <div className="grid grid-cols-2 gap-x-6 gap-y-0.5 text-xs font-mono">
-          <span className="text-muted-foreground">Dec</span><span className="break-all select-all">{num.toString(10)}</span>
-          <span className="text-muted-foreground">Hex</span><span className="break-all select-all">0x{num.toString(16).toUpperCase()}</span>
-          <span className="text-muted-foreground">Bin</span><span className="break-all select-all">0b{num.toString(2)}</span>
-          <span className="text-muted-foreground">Oct</span><span className="break-all select-all">0o{num.toString(8)}</span>
+    <div className="space-y-1">
+      {rows.map(({ base, ph }) => (
+        <div key={base} className="flex items-center gap-1.5">
+          <span className="text-[11px] font-mono text-muted-foreground w-4 text-right shrink-0 select-none">{base}</span>
+          <Input
+            value={val(base)}
+            onChange={(e) => setSrc({ base, raw: e.target.value })}
+            onFocus={() => { if (src?.base !== base) setSrc({ base, raw: val(base) }); }}
+            placeholder={ph}
+            className="font-mono h-7 text-xs"
+            autoFocus={base === 10}
+          />
         </div>
-      ) : input ? <Err msg="Invalid input" /> : null}
+      ))}
+      {src?.raw.trim() && parsed === null && <Err msg="Invalid input" />}
     </div>
   );
 }
@@ -79,7 +109,7 @@ function GweiTool() {
     <div className="space-y-2">
       <div className="flex gap-2">
         <Input placeholder="1.5" value={input} onChange={(e) => setInput(e.target.value)}
-          className="font-mono h-7 text-xs flex-1" autoFocus />
+          className="font-mono h-7 text-xs flex-1" />
         <Select value={unit} onValueChange={(v) => setUnit(v as typeof unit)}>
           <SelectTrigger className="h-7 text-xs w-20 font-mono">
             <SelectValue />
@@ -92,11 +122,18 @@ function GweiTool() {
         </Select>
       </div>
       {err ? <Err msg={err} /> : wei !== null && (
-        <div className="grid grid-cols-2 gap-x-6 gap-y-0.5 text-xs font-mono">
-          <span className="text-muted-foreground">wei</span>  <span className="select-all break-all">{wei.toString()}</span>
-          <span className="text-muted-foreground">gwei</span> <span className="select-all">{formatUnits(wei, 9)}</span>
-          <span className="text-muted-foreground">ether</span><span className="select-all">{formatUnits(wei, 18)}</span>
-          <span className="text-muted-foreground">hex</span>  <span className="select-all">0x{wei.toString(16).toUpperCase()}</span>
+        <div className="space-y-0.5 text-xs font-mono">
+          {[
+            { label: "wei",   value: wei.toString() },
+            { label: "gwei",  value: formatUnits(wei, 9) },
+            { label: "ether", value: formatUnits(wei, 18) },
+            { label: "hex",   value: "0x" + wei.toString(16).toLowerCase() },
+          ].map(({ label, value }) => (
+            <div key={label} className="flex items-center gap-1.5">
+              <span className="text-muted-foreground shrink-0 w-8">{label}</span>
+              <span className="select-all break-all">{value}</span>
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -372,53 +409,70 @@ function SlotTool() {
 
 function TimestampTool() {
   const [tsInput, setTsInput] = useState("");
+  const [tz, setTz] = useState<"local" | "utc">("local");
   const [blockInput, setBlockInput] = useState("");
-  const [blockResult, setBlockResult] = useState("");
+  const [blockTs, setBlockTs] = useState<number | null>(null);
   const [blockLoading, setBlockLoading] = useState(false);
   const [blockError, setBlockError] = useState("");
-  const nowTs = Math.floor(Date.now() / 1000);
+
   const ts = tsInput.trim() ? Number(tsInput.trim()) : null;
   const tsDate = ts !== null && !isNaN(ts) ? new Date(ts * 1000) : null;
 
+  const fmtDate = (d: Date) => tz === "utc"
+    ? [d.toISOString(), d.toUTCString()]
+    : [d.toISOString(), d.toLocaleString()];
+
+  const fmtBlockResult = (t: number) => {
+    const d = new Date(t * 1000);
+    const [iso, human] = fmtDate(d);
+    return `${t}  ·  ${iso}  ·  ${human}`;
+  };
+
   const fetchBlock = async () => {
-    setBlockError(""); setBlockResult("");
+    setBlockError(""); setBlockTs(null);
     const b = blockInput.trim(); if (!b) return;
     setBlockLoading(true);
     try {
       const client = createPublicClient({ transport: http(getSelectedRpc()) });
       const block = await client.getBlock(b === "latest" ? {} : { blockNumber: BigInt(b) });
-      const t = Number(block.timestamp);
-      const d = new Date(t * 1000);
-      setBlockResult(`${t}  ·  ${d.toISOString()}  ·  ${d.toLocaleString()}`);
+      setBlockTs(Number(block.timestamp));
     } catch (e) { setBlockError(e instanceof Error ? e.message : String(e)); }
     finally { setBlockLoading(false); }
   };
 
   return (
     <div className="space-y-2">
-      <div className="flex gap-2 items-center">
+      <div className="flex gap-1.5 items-center">
         <Input placeholder="Unix timestamp" value={tsInput}
-          onChange={(e) => setTsInput(e.target.value)} className="font-mono h-7 text-xs w-40" autoFocus />
-        <button className="text-[11px] text-muted-foreground hover:text-foreground transition-colors shrink-0"
-          onClick={() => setTsInput(String(nowTs))}>now</button>
+          onChange={(e) => setTsInput(e.target.value)} className="font-mono h-7 text-xs flex-1" />
+        <Button size="sm" variant="outline" className="h-7 px-2 text-xs shrink-0"
+          onClick={() => setTsInput(String(Math.floor(Date.now() / 1000)))}>Now</Button>
+        <Select value={tz} onValueChange={(v) => setTz(v as "local" | "utc")}>
+          <SelectTrigger className="h-7 text-xs w-20 font-mono shrink-0">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="local" className="text-xs font-mono">Local</SelectItem>
+            <SelectItem value="utc"   className="text-xs font-mono">UTC</SelectItem>
+          </SelectContent>
+        </Select>
       </div>
       {tsDate && (
         <div className="space-y-0.5">
-          <ResultBox value={tsDate.toISOString()} />
-          <ResultBox value={tsDate.toLocaleString()} />
+          {fmtDate(tsDate).map((v, i) => <ResultBox key={i} value={v} />)}
         </div>
       )}
-      <div className="flex gap-2 items-center border-t pt-1.5">
+      <div className="flex gap-1.5 items-center border-t pt-1.5">
         <Input placeholder="Block number or 'latest'" value={blockInput}
-          onChange={(e) => { setBlockInput(e.target.value); setBlockResult(""); setBlockError(""); }}
+          onChange={(e) => { setBlockInput(e.target.value); setBlockTs(null); setBlockError(""); }}
           className="font-mono h-7 text-xs flex-1"
           onKeyDown={(e) => e.key === "Enter" && fetchBlock()} />
-        <Button size="sm" className="h-7 px-3 text-xs shrink-0" onClick={fetchBlock} disabled={blockLoading}>
+        <Button size="sm" className="h-7 px-2 text-xs shrink-0" onClick={fetchBlock} disabled={blockLoading}>
           {blockLoading ? "..." : "Fetch"}
         </Button>
       </div>
       {blockError && <Err msg={blockError} />}
-      {blockResult && <ResultBox value={blockResult} />}
+      {blockTs !== null && <ResultBox value={fmtBlockResult(blockTs)} />}
     </div>
   );
 }
@@ -427,13 +481,13 @@ function TimestampTool() {
 
 export function UtilitiesDrawer() {
   const isOpen = useDebugStore((s) => s.isUtilitiesOpen);
-  const [activeTool, setActiveTool] = useState<Tool>("baseconv");
+  const [activeTool, setActiveTool] = useState<Tool>("conv");
   const [pinned, setPinned] = useState(false);
   const close = () => useDebugStore.getState().sync({ isUtilitiesOpen: false });
 
   return (
     <Sheet open={isOpen} onOpenChange={(o) => { if (!o && !pinned) close(); }}>
-      <SheetContent side="bottom" className="flex flex-col p-0 gap-0 [&>button:first-child]:hidden" style={{ height: "220px" }}>
+      <SheetContent side="bottom" className="flex flex-col p-0 gap-0 [&>button:first-child]:hidden" style={{ height: "320px" }}>
         <SheetTitle className="sr-only">Utilities</SheetTitle>
         {/* Tab bar */}
         <div className="flex items-center gap-1 px-2 pt-1.5 pb-1 flex-shrink-0 border-b bg-muted/60 overflow-x-auto scrollbar-hidden">
@@ -453,16 +507,21 @@ export function UtilitiesDrawer() {
           </div>
         </div>
         {/* Content */}
-        <div className="flex-1 overflow-auto px-3 pt-1.5 pb-2">
-          {activeTool === "baseconv"  && <BaseConvTool />}
-          {activeTool === "gwei"      && <GweiTool />}
-          {activeTool === "keccak256" && <Keccak256Tool />}
-          {activeTool === "4byte"     && <FourByteTool />}
-          {activeTool === "checksum"  && <ChecksumTool />}
-          {activeTool === "abi"       && <AbiTool />}
-          {activeTool === "slot"      && <SlotTool />}
-          {activeTool === "timestamp" && <TimestampTool />}
-        </div>
+        {activeTool === "conv" ? (
+          <div className="flex-1 grid grid-cols-3 divide-x overflow-hidden">
+            <div className="overflow-auto px-3 pt-1.5 pb-2"><BaseConvTool /></div>
+            <div className="overflow-auto px-3 pt-1.5 pb-2"><GweiTool /></div>
+            <div className="overflow-auto px-3 pt-1.5 pb-2"><TimestampTool /></div>
+          </div>
+        ) : (
+          <div className="flex-1 overflow-auto px-3 pt-1.5 pb-2">
+            {activeTool === "keccak256" && <Keccak256Tool />}
+            {activeTool === "4byte"     && <FourByteTool />}
+            {activeTool === "checksum"  && <ChecksumTool />}
+            {activeTool === "abi"       && <AbiTool />}
+            {activeTool === "slot"      && <SlotTool />}
+          </div>
+        )}
       </SheetContent>
     </Sheet>
   );
