@@ -48,6 +48,10 @@ export interface PlaybackSlice {
   executedOpcodeSet: Set<number>;
   // 4byte 远程查询结果缓存（selector → 函数名）
   resolvedFnCache: Record<string, string>;
+  // 范围播放模式
+  rangeEnabled: boolean;
+  rangeStart: number;
+  rangeEnd: number;
 }
 
 const initialPlayback: PlaybackSlice = {
@@ -73,6 +77,9 @@ const initialPlayback: PlaybackSlice = {
   callTreeNodes: [],
   executedOpcodeSet: new Set<number>(),
   resolvedFnCache: {},
+  rangeEnabled: false,
+  rangeStart: 0,
+  rangeEnd: 0,
 };
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -212,8 +219,9 @@ export interface TxSlice {
   currentDebugChainId: number | undefined;
 }
 
+const testTx = import.meta.env.VITE_TEST_TX ?? "";
 const initialTx: TxSlice = {
-  tx: "",
+  tx: testTx,
   txData: null,
   blockData: null,
   isFetchingTx: false,

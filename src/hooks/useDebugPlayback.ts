@@ -263,17 +263,21 @@ export function useDebugPlayback(
   const playNextStep = useCallback(() => {
     if (!isPlaying.current) return;
 
-    const { pauseOpJump, pauseCondJump } = useDebugStore.getState().config;
+    const storeState = useDebugStore.getState();
+    const { pauseOpJump, pauseCondJump } = storeState.config;
+    const { rangeEnabled, rangeStart, rangeEnd } = storeState;
     let stepsExecuted = 0;
     let lastContextId: number | undefined;
     // 每批次预构建 contextId → 数组下标映射，O(N_frames) 一次，避免每步 find()
     const frameMap = new Map<number, number>(
       callFrames.current.map((f, idx) => [f.contextId, idx])
     );
+    // 范围模式上界（exclusive）
+    const rangeUpper = rangeEnabled ? Math.min(rangeEnd + 1, allSteps.current.length) : allSteps.current.length;
 
     // ── 全量缓存模式：每步都走 applyStep（全量 stack/memory），batchSize 固定为 1 ──
     if (fullDataCache.current) {
-      const from = currentStepIndex.current + 1;
+      const from = rangeEnabled ? Math.max(currentStepIndex.current + 1, rangeStart) : currentStepIndex.current + 1;
 
       // 有 breakOpcodes + opcodeIndex 时，直接二分跳（同非缓存路径）
       if (pauseOpJump && breakOpcodes.current.size > 0 && opcodeIndex.current.size > 0) {
@@ -289,6 +293,7 @@ export function useDebugPlayback(
           }
           if (found !== -1 && (nearest === -1 || found < nearest)) nearest = found;
         }
+        if (rangeEnabled && nearest > rangeEnd) nearest = -1;
         if (nearest !== -1) {
           const targetStep = allSteps.current[nearest];
           if (targetStep && frameMap.has(targetStep.contextId)) {
@@ -305,7 +310,7 @@ export function useDebugPlayback(
       if (pauseCondJump && conditionHitSet.current.size > 0) {
         let nearestCond = -1;
         for (const idx of conditionHitSet.current) {
-          if (idx >= from && (nearestCond === -1 || idx < nearestCond)) nearestCond = idx;
+          if (idx >= from && idx < rangeUpper && (nearestCond === -1 || idx < nearestCond)) nearestCond = idx;
         }
         if (nearestCond !== -1) {
           const targetStep = allSteps.current[nearestCond];
@@ -319,9 +324,8 @@ export function useDebugPlayback(
         }
       }
 
-      const total = allSteps.current.length;
       let nextIndex: number | null = null;
-      for (let idx = from; idx < total; idx++) {
+      for (let idx = from; idx < rangeUpper; idx++) {
         if (frameMap.has(allSteps.current[idx].contextId)) { nextIndex = idx; break; }
       }
       if (nextIndex === null) {
@@ -357,7 +361,7 @@ export function useDebugPlayback(
 
     // 如果有 breakOpcodes，用 opcodeIndex 二分查找直接跳到最近的目标步骤
     if (pauseOpJump && breakOpcodes.current.size > 0 && opcodeIndex.current.size > 0) {
-      const from = currentStepIndex.current + 1;
+      const from = rangeEnabled ? Math.max(currentStepIndex.current + 1, rangeStart) : currentStepIndex.current + 1;
       let nearest = -1;
       for (const op of breakOpcodes.current) {
         const arr = opcodeIndex.current.get(op);
@@ -371,6 +375,7 @@ export function useDebugPlayback(
         }
         if (found !== -1 && (nearest === -1 || found < nearest)) nearest = found;
       }
+      if (rangeEnabled && nearest > rangeEnd) nearest = -1;
       if (nearest !== -1) {
         // 验证该步骤属于可见 frame
         const targetStep = allSteps.current[nearest];
@@ -388,10 +393,10 @@ export function useDebugPlayback(
 
     // pauseCondJump: 直接跳到最近的 conditionHitSet 命中步骤（批量模式）
     if (pauseCondJump && conditionHitSet.current.size > 0) {
-      const from = currentStepIndex.current + 1;
+      const from = rangeEnabled ? Math.max(currentStepIndex.current + 1, rangeStart) : currentStepIndex.current + 1;
       let nearestCond = -1;
       for (const idx of conditionHitSet.current) {
-        if (idx >= from && (nearestCond === -1 || idx < nearestCond)) nearestCond = idx;
+        if (idx >= from && idx < rangeUpper && (nearestCond === -1 || idx < nearestCond)) nearestCond = idx;
       }
       if (nearestCond !== -1) {
         const targetStep = allSteps.current[nearestCond];
@@ -409,11 +414,10 @@ export function useDebugPlayback(
 
     // 批量执行 - 从 ref 读取 batchSize
     // 内联 findValidStep 逻辑，直接用 frameMap 做 O(1) contextId 查找
-    const total = allSteps.current.length;
     for (let i = 0; i < batchSize.current; i++) {
       // 内联 findValidStep（正向）：直接用 frameMap.has() 替代 .some()
       let nextIndex: number | null = null;
-      for (let idx = currentStepIndex.current + 1; idx < total; idx++) {
+      for (let idx = currentStepIndex.current + 1; idx < rangeUpper; idx++) {
         if (frameMap.has(allSteps.current[idx].contextId)) {
           nextIndex = idx;
           break;
@@ -609,10 +613,14 @@ export function useDebugPlayback(
     if (isPlaying.current) {
       stopPlaying();
     } else {
-      // 如果已经到末尾，从头开始
-      if (currentStepIndex.current >= allSteps.current.length - 1) {
-        currentStepIndex.current = -1;
-        setCurrentStepIndex(-1);
+      const { rangeEnabled: re, rangeStart: rs, rangeEnd: rEnd } = useDebugStore.getState();
+      const atEnd = re
+        ? currentStepIndex.current >= rEnd
+        : currentStepIndex.current >= allSteps.current.length - 1;
+      if (atEnd) {
+        const resetTo = re ? rs - 1 : -1;
+        currentStepIndex.current = resetTo;
+        setCurrentStepIndex(resetTo);
         setTimeout(startPlaying, 0);
       } else {
         startPlaying();
