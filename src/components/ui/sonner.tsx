@@ -8,7 +8,7 @@ const Toaster = ({ ...props }: ToasterProps) => {
       theme="dark"
       className="toaster group"
       position="top-center"
-      duration={1000}
+      duration={2000}
       toastOptions={{
         classNames: {
           toast:

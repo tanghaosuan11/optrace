@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button";
+import { Spinner } from "@/components/ui/spinner";
 import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Card } from "@/components/ui/card";
@@ -116,7 +117,14 @@ export function MainInterface({
             </Button>
           ) : (
             <Button onClick={onStartDebug} disabled={isDebugging || !txData} variant="outline" size="sm" className="whitespace-nowrap h-7 px-3">
-              {isDebugging ? "Debugging..." : "Start Debug"}
+              {isDebugging ? (
+                <>
+                  <Spinner className="size-3.5" />
+                  Debugging…
+                </>
+              ) : (
+                "Start Debug"
+              )}
             </Button>
           )}
           {config.isDebug && (
@@ -126,7 +134,17 @@ export function MainInterface({
           )}
         </div>
       </div>
-      <div className="flex-1 min-h-0 flex flex-col overflow-hidden">
+      <div className="flex-1 min-h-0 flex flex-col overflow-hidden relative">
+        {isDebugging ? (
+          <div
+            className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-background/70 backdrop-blur-[2px]"
+            aria-busy="true"
+            aria-live="polite"
+          >
+            <Spinner className="size-9 text-primary" />
+            <p className="text-sm text-muted-foreground">Tracing transaction…</p>
+          </div>
+        ) : null}
         <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col min-h-0">
           <div className="flex-shrink-0 px-4 pt-2">
             <TabsList className="h-7 bg-transparent p-0">

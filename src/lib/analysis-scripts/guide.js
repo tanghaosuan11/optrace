@@ -170,6 +170,10 @@
 //     Result: [{stepIndex, frameId, isTransient, isRead, contract, key, oldValue, newValue}]
 //     Example: getStorageChanges("0xa0b8...")
 //     Example: getStorageChanges("", 0, 100000)   // all contracts, first 100k steps
+
+//   saveDataRaw(fileName, data)
+//     Save data to a file in the App Data directory.
+//     Example: saveDataRaw("filename.json", JSON.stringify(results))
 //
 // ── Recommended Pattern for Large Transactions ──────────────
 //

@@ -203,6 +203,35 @@ async fn reset_session(
     Ok(())
 }
 
+/// 代理请求 eth-labels.com API，绕过浏览器 CORS 限制
+#[tauri::command]
+async fn fetch_address_labels(address: String) -> Result<Vec<serde_json::Value>, String> {
+    let url = format!("https://eth-labels.com/labels/{}", address.to_lowercase());
+    
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+    
+    let response = client
+        .get(&url)
+        .header("User-Agent", "OpTrace-Debugger/1.0")
+        .send()
+        .await
+        .map_err(|e| format!("HTTP request failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Ok(Vec::new()); // 返回空数组表示无标签
+    }
+
+    let labels: Vec<serde_json::Value> = response
+        .json()
+        .await
+        .unwrap_or_default();
+
+    Ok(labels)
+}
+
 // 打开应用数据目录
 #[tauri::command]
 async fn open_app_data_dir(app: tauri::AppHandle) -> Result<(), String> {
@@ -268,7 +297,7 @@ pub fn run() {
         .manage(AnalysisCancelFlag(Arc::new(AtomicBool::new(false))))
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet, op_trace, seek_to, scan_conditions, range_full_data, run_analysis, cancel_analysis, find_value_origin, open_app_data_dir, save_data, reset_session, sourcify::sourcify_read_cache, sourcify::sourcify_write_cache])
+        .invoke_handler(tauri::generate_handler![greet, op_trace, seek_to, scan_conditions, range_full_data, run_analysis, cancel_analysis, find_value_origin, open_app_data_dir, save_data, reset_session, fetch_address_labels, sourcify::sourcify_read_cache, sourcify::sourcify_write_cache])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

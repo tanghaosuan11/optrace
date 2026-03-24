@@ -5,6 +5,8 @@ import fourbyteDb from "@/lib/fourbyteDb.json";
 import { getUserFn } from "@/lib/userFourbyteDb";
 import { useDebugStore } from "@/store/debugStore";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { useCallTreeAddressLabels, type AddressLabelMap } from "@/hooks/useCallTreeAddressLabels";
+import { useCallTreeFilters } from "@/hooks/useCallTreeFilters";
 
 // Inject / update a <style> tag to highlight all [data-addr="..."] elements globally
 const STYLE_ID = "calltree-addr-highlight";
@@ -127,6 +129,22 @@ function getFnLabel(input?: string, resolvedFns?: Record<string, string>): strin
   return db[selector]?.fn ?? getUserFn(selector) ?? resolvedFns?.[selector] ?? ('0x' + hex.slice(0, 8));
 }
 
+/**
+ * 获取地址的显示文本（优先显示标签）
+ */
+function getAddrDisplay(addr: string | undefined, addressLabels: AddressLabelMap): {
+  display: string;
+  hasLabel: boolean;
+} {
+  if (!addr) return { display: '—', hasLabel: false };
+  const normalized = addr.toLowerCase();
+  const label = addressLabels[normalized];
+  if (label) {
+    return { display: label.name || label.label, hasLabel: true };
+  }
+  return { display: fullAddr(addr), hasLabel: false };
+}
+
 // ── node row ──────────────────────────────────────────────────────────────────
 
 interface NodeRowProps {
@@ -144,6 +162,7 @@ interface NodeRowProps {
   showGas: boolean;
   txGasUsed?: bigint;
   resolvedFns: Record<string, string>;
+  addressLabels: AddressLabelMap;
 }
 
 /** Renders the row-number cell + depth guide columns (vertical bars) */
@@ -169,7 +188,7 @@ function RowPrefix({ rowIndex, depth }: { rowIndex: number | string; depth: numb
   );
 }
 
-function NodeRow({ node, rowIndex, isCollapsed, isActive, isActiveEvent, hoveredAddr: _hoveredAddr, onHoverAddr, onToggle, onSeekTo, onSelectFrame, onNavigateTo, showGas, txGasUsed, resolvedFns }: NodeRowProps) {
+function NodeRow({ node, rowIndex, isCollapsed, isActive, isActiveEvent, hoveredAddr: _hoveredAddr, onHoverAddr, onToggle, onSeekTo, onSelectFrame, onNavigateTo, showGas, txGasUsed, resolvedFns, addressLabels }: NodeRowProps) {
   if (node.type === 'frame') {
     const fnLabel = getFnLabel(node.input, resolvedFns);
     const isCreateType = node.callType === 'create' || node.callType === 'create2';
@@ -215,11 +234,11 @@ function NodeRow({ node, rowIndex, isCollapsed, isActive, isActiveEvent, hovered
               onMouseEnter={() => onHoverAddr(targetAddr)}
               onMouseLeave={() => onHoverAddr(null)}
             >
-              {fullAddr(node.target ?? node.address)}
+              {getAddrDisplay(node.target ?? node.address, addressLabels).display}
             </span>
           ) : (
             <span className="inline-flex items-center font-mono font-semibold flex-shrink-0 border rounded-sm px-2 py-0.5 leading-none text-[11px]" style={{color:'rgb(20 90 160)', borderColor:'rgb(20 90 160 / 0.4)'}}>
-              {fullAddr(node.target ?? node.address)}
+              {getAddrDisplay(node.target ?? node.address, addressLabels).display}
             </span>
           )}
           {!isCreateType && fnLabel && (
@@ -369,13 +388,15 @@ export function CallTreeViewer({ onSeekTo, onSelectFrame, onNavigateTo }: CallTr
   const activeTab = useDebugStore((s) => s.activeTab);
   const currentStepIndex = useDebugStore((s) => s.currentStepIndex);
   const txGasUsed = useDebugStore((s) => s.txData?.gasUsed);
+  const chainId = useDebugStore((s) => s.currentDebugChainId);
+
+  // 获取地址标签
+  const { labels: addressLabels } = useCallTreeAddressLabels(nodes, chainId);
+  
+  // 加载和管理 CallTree 过滤器状态（自动保存到 tauriStore）
+  const { filters, updateFilter } = useCallTreeFilters();
+  
   const [collapsed, setCollapsed] = useState<Set<number>>(new Set());
-  const [showSload, setShowSload] = useState(false);
-  const [showSstore, setShowSstore] = useState(true);
-  const [showTload, setShowTload] = useState(false);
-  const [showTstore, setShowTstore] = useState(true);
-  const [showStaticCall, setShowStaticCall] = useState(true);
-  const [showGas, setShowGas] = useState(true);
   const [hoveredAddr, setHoveredAddr] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerHeight, setContainerHeight] = useState(300);
@@ -411,13 +432,13 @@ export function CallTreeViewer({ onSeekTo, onSelectFrame, onNavigateTo }: CallTr
 
   const filtered = useMemo(() => {
     let result = nodes;
-    if (!showSload) result = result.filter(n => n.type !== 'sload');
-    if (!showSstore) result = result.filter(n => n.type !== 'sstore');
-    if (!showTload) result = result.filter(n => n.type !== 'tload');
-    if (!showTstore) result = result.filter(n => n.type !== 'tstore');
-    if (!showStaticCall) result = result.filter(n => !(n.type === 'frame' && n.callType === 'staticcall'));
+    if (!filters.showSload) result = result.filter(n => n.type !== 'sload');
+    if (!filters.showSstore) result = result.filter(n => n.type !== 'sstore');
+    if (!filters.showTload) result = result.filter(n => n.type !== 'tload');
+    if (!filters.showTstore) result = result.filter(n => n.type !== 'tstore');
+    if (!filters.showStaticCall) result = result.filter(n => !(n.type === 'frame' && n.callType === 'staticcall'));
     return result;
-  }, [nodes, showSload, showSstore, showTload, showTstore, showStaticCall]);
+  }, [nodes, filters]);
 
   const visible = useMemo(() => getVisibleNodes(filtered, collapsed), [filtered, collapsed]);
 
@@ -511,15 +532,15 @@ export function CallTreeViewer({ onSeekTo, onSelectFrame, onNavigateTo }: CallTr
       <div className="flex items-center gap-3 px-2 py-1 border-b bg-muted/90 flex-shrink-0 text-[11px]">
         <span className="text-muted-foreground font-mono">{visible.length} / {nodes.length} nodes</span>
         {[
-          { label: 'SLOAD', checked: showSload, set: setShowSload },
-          { label: 'SSTORE', checked: showSstore, set: setShowSstore },
-          { label: 'TLOAD', checked: showTload, set: setShowTload },
-          { label: 'TSTORE', checked: showTstore, set: setShowTstore },
-          { label: 'STATIC', checked: showStaticCall, set: setShowStaticCall },
-          { label: 'GAS', checked: showGas, set: setShowGas },
-        ].map(({ label, checked, set }) => (
+          { label: 'SLOAD', key: 'showSload' as const, checked: filters.showSload },
+          { label: 'SSTORE', key: 'showSstore' as const, checked: filters.showSstore },
+          { label: 'TLOAD', key: 'showTload' as const, checked: filters.showTload },
+          { label: 'TSTORE', key: 'showTstore' as const, checked: filters.showTstore },
+          { label: 'STATIC', key: 'showStaticCall' as const, checked: filters.showStaticCall },
+          { label: 'GAS', key: 'showGas' as const, checked: filters.showGas },
+        ].map(({ label, key, checked }) => (
           <label key={label} className="flex items-center gap-1 cursor-pointer select-none text-muted-foreground">
-            <input type="checkbox" checked={checked} onChange={e => set(e.target.checked)} className="h-3 w-3 accent-primary" />
+            <input type="checkbox" checked={checked} onChange={e => updateFilter(key, e.target.checked)} className="h-3 w-3 accent-primary" />
             {label}
           </label>
         ))}
@@ -527,7 +548,7 @@ export function CallTreeViewer({ onSeekTo, onSelectFrame, onNavigateTo }: CallTr
           className="ml-auto text-muted-foreground hover:text-foreground transition-colors"
           onClick={() => setCollapsed(new Set())}
         >
-          全部展开
+          Expand All
         </button>
         <button
           className="text-muted-foreground hover:text-foreground transition-colors"
@@ -536,7 +557,7 @@ export function CallTreeViewer({ onSeekTo, onSelectFrame, onNavigateTo }: CallTr
             setCollapsed(frameIds);
           }}
         >
-          全部折叠
+          Collapse All
         </button>
       </div>
 
@@ -570,9 +591,10 @@ export function CallTreeViewer({ onSeekTo, onSelectFrame, onNavigateTo }: CallTr
                 onSeekTo={onSeekTo}
                 onSelectFrame={onSelectFrame}
                 onNavigateTo={onNavigateTo}
-                showGas={showGas}
+                showGas={filters.showGas}
                 txGasUsed={txGasUsed}
                 resolvedFns={resolvedFns}
+                addressLabels={addressLabels}
               />
             </div>
           ))}
