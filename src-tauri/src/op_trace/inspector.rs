@@ -8,6 +8,9 @@ use crate::{
         frame_manager::{FrameInfo, FrameManager},
         tracer::memory_tracer::MemoryTracer,
         tracer::storage_tracer::StorageTracer,
+        tracer::gas_tracer::GasTracer,
+        tracer::log_tracer::LogTracer,
+        tracer::bytecode_tracer::BytecodeTracer,
     },
     optrace_journal::OpTraceJournal,
 };
@@ -44,10 +47,6 @@ struct StepInfo {
     memory_size: usize,
     /// 执行前内存大小，用于检测 MLOAD 等导致的静默内存扩张
     memory_len_before: usize,
-    stack: Vec<U256>,
-    gas_remaining_before: u64,
-    gas_remaining_after: u64,
-    gas_cost: u64,
 }
 
 pub(crate) trait CallInputExt {
@@ -86,6 +85,9 @@ pub(crate) struct Cheatcodes<BlockT, TxT, CfgT> {
     frame_manager: FrameManager,
     memory_tracer: MemoryTracer,
     storage_tracer: StorageTracer,
+    gas_tracer: GasTracer,
+    log_tracer: LogTracer,
+    bytecode_tracer: BytecodeTracer,
 }
 
 impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT> {
@@ -101,6 +103,9 @@ impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT> {
             frame_manager: FrameManager::new(debug_session),
             memory_tracer: MemoryTracer::new(),
             storage_tracer: StorageTracer::new(),
+            gas_tracer: GasTracer::new(),
+            log_tracer: LogTracer::new(),
+            bytecode_tracer: BytecodeTracer::new(),
         }
     }
 
@@ -120,20 +125,6 @@ impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT> {
         self.encoder.send_balance_changes(json);
     }
 
-    /// 每 50 步全量抓一次内存，其余返回空快照。
-    fn collect_memory_snapshot(
-        &self,
-        interp: &revm::interpreter::Interpreter<EthInterpreter>,
-    ) -> (bool, usize, Vec<u8>) {
-        let frame_step = self.frame_manager.current_step_count();
-        if frame_step % 50 == 0 {
-            let size = interp.memory.len();
-            let data = interp.memory.slice(0..size).to_vec();
-            (true, 0, data)
-        } else {
-            (false, 0, Vec::new())
-        }
-    }
 }
 
 impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT>
@@ -182,23 +173,6 @@ where
             .send_frame_update_address(self.frame_manager.current_id(), address);
     }
 
-    fn send_memory_update(&self, dst_offset: u32, memory: &[u8]) {
-        self.encoder.send_memory_update(
-            self.frame_manager.current_id(),
-            self.frame_manager.current_step_count(),
-            dst_offset,
-            memory,
-        );
-    }
-
-    fn send_frame_result(&self, return_data: &[u8]) {
-        self.encoder.send_return_data(
-            self.frame_manager.current_id(),
-            self.step_info.step_count,
-            return_data,
-        );
-    }
-
     fn send_storage_change(
         &self,
         is_transient: bool,
@@ -224,19 +198,8 @@ where
 
     fn send_frame_logs(&self, log: &Log) {
         let ctx_id = self.frame_manager.current_id();
-        // step_count 在 step() 末尾已经 +1，所以这里要 -1 来得到产生 log 的那一步的索引
-        let log_step_index = self.step_info.step_count.saturating_sub(1);
+        let log_step_index = self.log_tracer.get_log_step_index();
         self.encoder.send_logs(ctx_id, log_step_index, log);
-    }
-
-    /// 计算本步 gas 消耗，回填到 step_payload 中的占位字段，并在达到阈值时批量发送。
-    fn backfill_gas_cost(&mut self, interp: &revm::interpreter::Interpreter<EthInterpreter>) {
-        self.step_info.gas_remaining_after = interp.gas.remaining();
-        self.step_info.gas_cost = self
-            .step_info
-            .gas_remaining_before
-            .saturating_sub(self.step_info.gas_remaining_after);
-        self.encoder.backfill_gas_cost(self.step_info.gas_cost);
     }
 
     /// 扫描 journal 中新增的条目，发送 Storage / TransientStorage 变迁消息。
@@ -360,9 +323,12 @@ where
         }
     }
 
-    fn update_frame_bytecode(&self, depth: u16, _context_id: u16, bytecode: &Bytes) {
-        self.encoder
-            .send_contract_source(depth, self.frame_manager.current_id(), bytecode);
+    fn update_frame_bytecode(&mut self, depth: u16, _context_id: u16, bytecode: &Bytes) {
+        if self.bytecode_tracer.has_bytecode_changed(bytecode) {
+            self.bytecode_tracer.update_bytecode_hash(bytecode);
+            self.encoder
+                .send_contract_source(depth, self.frame_manager.current_id(), bytecode);
+        }
     }
 }
 
@@ -388,7 +354,7 @@ where
 
         self.step_info.pc = interp.bytecode.pc();
         self.step_info.opcode = op;
-        self.step_info.gas_remaining_before = interp.gas.remaining();
+        self.gas_tracer.record_gas_before(interp.gas.remaining());
         self.step_info.memory_len_before = interp.memory.len();
         let depth = context.journaled_state.depth();
 
@@ -404,7 +370,7 @@ where
             opcode,
             self.frame_manager.current_id(),
             depth as u16,
-            self.step_info.gas_remaining_before,
+            self.gas_tracer.get_gas_remaining_before(),
             interp.stack.data(),
             frame_step_count,
         );
@@ -420,7 +386,7 @@ where
                 pc: self.step_info.pc as u32,
                 opcode,
                 gas_cost: 0, // step_end 中回填
-                gas_remaining: self.step_info.gas_remaining_before,
+                gas_remaining: self.gas_tracer.get_gas_remaining_before(),
                 stack: interp.stack.data().to_vec(),
                 contract_address: self.frame_manager.current_address(),
                 call_target: self.frame_manager.current_target(),
@@ -435,6 +401,8 @@ where
 
         self.frame_manager.current_increment_step_count();
         // flush 移到 step_end，确保 gas_cost 回填后再发送
+        // 记录当前 step 计数供 LogTracer 使用
+        self.log_tracer.record_current_step_count(self.step_info.step_count);
 
         self.step_info.step_count += 1;
     }
@@ -444,15 +412,17 @@ where
         interp: &mut revm::interpreter::Interpreter<EthInterpreter>,
         context: &mut Context<BlockT, TxT, CfgT, AlloyCacheDB, OpTraceJournal<AlloyCacheDB>>,
     ) {
-        self.backfill_gas_cost(interp);
+        self.gas_tracer.backfill_gas_cost(interp);
 
         // 回填 DebugSession 中最后一步的 gas_cost
         {
             let mut session = self.debug_session.lock().unwrap();
             if let Some(last) = session.trace.last_mut() {
-                last.gas_cost = self.step_info.gas_cost;
+                last.gas_cost = self.gas_tracer.get_gas_cost();
             }
         }
+        // 发送此步的 gas_cost 给前端
+        self.encoder.backfill_gas_cost(self.gas_tracer.get_gas_cost());
 
         self.process_journal_storage(context);
         // 只在 SLOAD/TLOAD 时才需要读栈顶，避免每步都做 Vec 堆分配
@@ -551,7 +521,7 @@ where
             ret_memory_offset,
             ret_memory_size,
         });
-        // Save frame metadata to DebugSession for analysis
+
         self.debug_session
             .lock()
             .unwrap()
@@ -578,12 +548,6 @@ where
         _inputs: &CallInputs,
         _outcome: &mut CallOutcome,
     ) {
-        // last_frame.status = Some(_outcome.result.clone());
-        // last_frame.success = last_frame
-        //     .status
-        //     .as_ref()
-        //     .is_some_and(|status| status.is_ok());
-        // last_frame.output = _outcome.result.output.clone();
         self.frame_manager
             .current_update_outcome(_outcome.result.output.clone(), _outcome.result.gas.spent());
         self.frame_manager
@@ -594,9 +558,7 @@ where
         let gas_used = _outcome.result.gas.spent();
         let output = self.frame_manager.current_output().clone();
         let frame_step_count = self.frame_manager.current_step_count();
-        // last_frame borrow ends here
 
-        // Finalize frame record in DebugSession
         self.debug_session.lock().unwrap().finalize_frame(
             frame_id,
             gas_used,
@@ -671,7 +633,7 @@ where
             ret_memory_offset: 0,
             ret_memory_size: 0,
         });
-        // Save frame metadata to DebugSession for analysis
+
         self.debug_session
             .lock()
             .unwrap()
@@ -700,11 +662,6 @@ where
     ) {
         self.frame_manager
             .current_update_status(_outcome.result.clone());
-        // let last_frame = self.frame_manager.current_frame().unwrap();
-        // last_frame.success = last_frame
-        //     .status
-        //     .as_ref()
-        //     .is_some_and(|status| status.is_ok());
         self.frame_manager
             .current_update_outcome(_outcome.result.output.clone(), _outcome.result.gas.spent());
         self.frame_manager
@@ -715,9 +672,7 @@ where
         let gas_used = _outcome.result.gas.spent();
         let output = self.frame_manager.current_output();
         let frame_step_count = self.frame_manager.current_step_count();
-        // last_frame borrow ends here
 
-        // Finalize frame record in DebugSession
         self.debug_session.lock().unwrap().finalize_frame(
             frame_id,
             gas_used,

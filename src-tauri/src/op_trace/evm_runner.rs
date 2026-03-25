@@ -101,11 +101,10 @@ pub(crate) fn compute_and_print_balance_changes(evm_state: &EvmState, logs: &[Lo
     }
 
     if wallet.is_empty() {
-        println!("[statediff] (no balance changes)");
+        // println!("[statediff] (no balance changes)");
         return "[]".to_string();
     }
 
-    println!("[statediff] ===== BALANCE CHANGES BY ADDRESS =====");
     let mut addrs: Vec<Address> = wallet.keys().cloned().collect();
     addrs.sort_by_key(|a| full_addr(a));
 
@@ -113,7 +112,7 @@ pub(crate) fn compute_and_print_balance_changes(evm_state: &EvmState, logs: &[Lo
 
     for addr in &addrs {
         let tokens = &wallet[addr];
-        println!("[statediff] {:?}", addr);
+        // println!("[statediff] {:?}", addr);
 
         // ETH
         let eth_json = if let Some(&(gained, lost)) = tokens.get(&eth_key) {
@@ -122,11 +121,11 @@ pub(crate) fn compute_and_print_balance_changes(evm_state: &EvmState, logs: &[Lo
             } else {
                 format!("-{}", lost - gained)
             };
-            if gained >= lost {
-                println!("  ETH  +{}", gained - lost);
-            } else {
-                println!("  ETH  -{}", lost - gained);
-            }
+            // if gained >= lost {
+            //     println!("  ETH  +{}", gained - lost);
+            // } else {
+            //     println!("  ETH  -{}", lost - gained);
+            // }
             format!("\"{}\"", delta_str)
         } else {
             "null".to_string()
@@ -143,11 +142,11 @@ pub(crate) fn compute_and_print_balance_changes(evm_state: &EvmState, logs: &[Lo
             let net_str = if gained >= lost {
                 if (gained - lost).is_zero() { continue; }
                 let n = gained - lost;
-                println!("  token {}  +{}", fmt_addr_short(token), n);
+                // println!("  token {}  +{}", fmt_addr_short(token), n);
                 format!("+{n}")
             } else {
                 let n = lost - gained;
-                println!("  token {}  -{}", fmt_addr_short(token), n);
+                // println!("  token {}  -{}", fmt_addr_short(token), n);
                 format!("-{n}")
             };
             token_json_parts.push(format!(
@@ -164,7 +163,6 @@ pub(crate) fn compute_and_print_balance_changes(evm_state: &EvmState, logs: &[Lo
         ));
     }
 
-    println!("[statediff] ===== END =====");
     format!("[{}]", json_entries.join(","))
 }
 
