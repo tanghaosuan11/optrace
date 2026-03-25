@@ -1,9 +1,7 @@
 use alloy_provider::{network::Ethereum, DynProvider};
 use revm::{
-    bytecode::OpCode,
     database::{AlloyDB, CacheDB},
     database_interface::WrapDatabaseAsync,
-    primitives::Bytes,
 };
 use serde::Serialize;
 
@@ -13,13 +11,13 @@ mod message_encoder;
 mod scan;
 pub mod debug_session;
 mod types;
+mod frame_manager;
 pub mod fork;
 
 pub use debug_session::DebugSessionState;
 pub use evm_runner::op_trace;
 pub use scan::{ConditionGroup, scan_conditions_impl};
 pub use types::{BlockDebugData, TxDebugData};
-pub use fork::StatePatch;
 
 pub(crate) type AlloyCacheDB = CacheDB<WrapDatabaseAsync<AlloyDB<Ethereum, DynProvider>>>;
 

@@ -1,3 +1,16 @@
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub enum CallKind {
+    #[default]
+    Call,
+    StaticCall,
+    CallCode,
+    DelegateCall,
+    AuthCall,
+    Create,
+    Create2,
+}
+
 #[derive(Debug, serde::Deserialize)]
 pub struct TxDebugData {
     pub from: String,
