@@ -13,9 +13,6 @@
        width="100%" muted autoplay loop playsinline controls muted>
 </video>
 
-> **注意：** 这是一个个人项目，功能较多，未来得及测试完所有功能，不保证结果正确。
-
----
 
 ## 什么是 OpTrace？
 
@@ -170,7 +167,7 @@ return sorted.slice(0, 10).map(s => `Step ${s.index}: ${s.opName} cost=${s.gasCo
 | RPC 客户端 | Alloy |
 | 并行计算 | Rayon |
 | 以太坊工具 | Viem 2 |
-| 通知 | Sonner |
+| 反编译 | Heimdall-rs |
 
 ## 快速开始
 

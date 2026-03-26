@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use crate::op_trace::{debug_session::DebugSession, types::CallKind};
-use revm::primitives::{Address, Bytes, Log, StorageKey, StorageValue, U256};
+use revm::primitives::{Address, Bytes,U256};
 use revm_interpreter::InterpreterResult;
 
 #[derive(Clone, Default, serde::Serialize)]
@@ -28,40 +28,6 @@ pub struct FrameInfo {
     pub ret_memory_offset: usize,
     /// CALL 指令的 retSize（父 frame 内存最大写入长度）
     pub ret_memory_size: usize,
-}
-
-impl FrameInfo {
-    pub fn new(
-        address: Address,
-        caller: Address,
-        target_address: Address,
-        value: U256,
-        kind: CallKind,
-        gas_limit: u64,
-        input: Bytes,
-    ) -> Self {
-        Self {
-            parent_id: 0,
-            depth: 0,
-            frame_id: 0,
-            address,
-            step_count: 0,
-            value,
-            caller,
-            target_address,
-            selfdestruct_refund_target: None,
-            selfdestruct_transferred_value: None,
-            kind,
-            gas_used: 0,
-            gas_limit,
-            input,
-            status: None,
-            success: false,
-            output: Bytes::new(),
-            ret_memory_offset: 0,
-            ret_memory_size: 0,
-        }
-    }
 }
 
 #[derive(Clone)]

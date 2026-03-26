@@ -13,9 +13,6 @@
        width="100%" muted autoplay loop playsinline controls muted>
 </video>
 
-> **Note:** This is a personal project with many features. Not all functionality has been fully tested — results may not always be correct.
-
----
 
 ## What is OpTrace?
 
@@ -166,11 +163,11 @@ Paste raw hex bytecode → instant disassembly with PC, opcode name, and PUSH im
 | State | Zustand 5 |
 | Code Editor | Monaco Editor |
 | Virtual Scroll | @tanstack/react-virtual 3 |
-| EVM | revm 36 |
+| EVM | Revm 36 |
 | RPC Client | Alloy |
 | Parallel | Rayon |
 | Ethereum Utils | Viem 2 |
-| Notifications | Sonner |
+| Decompile | Heimdall-rs |
 
 ### Getting Started
 

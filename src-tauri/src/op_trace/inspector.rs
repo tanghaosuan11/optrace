@@ -6,11 +6,11 @@
 use crate::{
     op_trace::{
         frame_manager::{FrameInfo, FrameManager},
-        tracer::memory_tracer::MemoryTracer,
-        tracer::storage_tracer::StorageTracer,
+        tracer::bytecode_tracer::BytecodeTracer,
         tracer::gas_tracer::GasTracer,
         tracer::log_tracer::LogTracer,
-        tracer::bytecode_tracer::BytecodeTracer,
+        tracer::memory_tracer::MemoryTracer,
+        tracer::storage_tracer::StorageTracer,
     },
     optrace_journal::OpTraceJournal,
 };
@@ -25,7 +25,7 @@ use revm::{
 };
 use revm_interpreter::{
     interpreter_types::{Jumps, MemoryTr},
-    CallInput, CallScheme, CreateInputs, CreateOutcome, CreateScheme, InterpreterResult,
+    CallInput, CallScheme, CreateInputs, CreateOutcome, CreateScheme,
 };
 use std::sync::{Arc, Mutex};
 
@@ -40,11 +40,6 @@ struct StepInfo {
     pc: usize,
     // 所有context的step累计计数
     step_count: usize,
-    // memory相关的临时变量，记录在 step 里，等 step_end 的时候发送给前端
-    // src 不一定是内存,可能是 calldata 或 code，所以命名为 src_data_offset
-    src_data_offset: usize,
-    dst_memory_offset: usize,
-    memory_size: usize,
     /// 执行前内存大小，用于检测 MLOAD 等导致的静默内存扩张
     memory_len_before: usize,
 }
@@ -87,7 +82,7 @@ pub(crate) struct Cheatcodes<BlockT, TxT, CfgT> {
     storage_tracer: StorageTracer,
     gas_tracer: GasTracer,
     log_tracer: LogTracer,
-    bytecode_tracer: BytecodeTracer,
+    // bytecode_tracer: BytecodeTracer,
 }
 
 impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT> {
@@ -105,7 +100,7 @@ impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT> {
             storage_tracer: StorageTracer::new(),
             gas_tracer: GasTracer::new(),
             log_tracer: LogTracer::new(),
-            bytecode_tracer: BytecodeTracer::new(),
+            // bytecode_tracer: BytecodeTracer::new(),
         }
     }
 
@@ -113,7 +108,7 @@ impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT> {
         self.encoder.flush_steps();
     }
 
-    pub(crate) fn set_verify_memory(&mut self, enable: bool) {
+    pub(crate) fn _set_verify_memory(&mut self, enable: bool) {
         self.verify_memory = enable;
     }
 
@@ -124,7 +119,6 @@ impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT> {
     pub(crate) fn send_balance_changes(&self, json: &str) {
         self.encoder.send_balance_changes(json);
     }
-
 }
 
 impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT>
@@ -233,14 +227,7 @@ where
                         false, false, frame_id, step_idx, addr, *key, *had_value, new_val,
                     );
                     new_changes.push(StorageTracer::create_change_record(
-                        step_idx,
-                        frame_id,
-                        false,
-                        false,
-                        addr,
-                        *key,
-                        *had_value,
-                        new_val,
+                        step_idx, frame_id, false, false, addr, *key, *had_value, new_val,
                     ));
                 }
                 if let JournalEntry::TransientStorageChange {
@@ -259,14 +246,7 @@ where
                         true, false, frame_id, step_idx, addr, *key, *had_value, new_val,
                     );
                     new_changes.push(StorageTracer::create_change_record(
-                        step_idx,
-                        frame_id,
-                        true,
-                        false,
-                        addr,
-                        *key,
-                        *had_value,
-                        new_val,
+                        step_idx, frame_id, true, false, addr, *key, *had_value, new_val,
                     ));
                 }
             }
@@ -307,10 +287,8 @@ where
                 zero,
                 *storage_data,
             );
-            self.debug_session
-                .lock()
-                .unwrap()
-                .push_storage_change(StorageTracer::create_change_record(
+            self.debug_session.lock().unwrap().push_storage_change(
+                StorageTracer::create_change_record(
                     step_idx,
                     frame_id,
                     is_transient,
@@ -319,16 +297,17 @@ where
                     storage_key,
                     zero,
                     *storage_data,
-                ));
+                ),
+            );
         }
     }
 
     fn update_frame_bytecode(&mut self, depth: u16, _context_id: u16, bytecode: &Bytes) {
-        if self.bytecode_tracer.has_bytecode_changed(bytecode) {
-            self.bytecode_tracer.update_bytecode_hash(bytecode);
-            self.encoder
-                .send_contract_source(depth, self.frame_manager.current_id(), bytecode);
-        }
+        // if self.bytecode_tracer.has_bytecode_changed(bytecode) {
+        //     self.bytecode_tracer.update_bytecode_hash(bytecode);
+        self.encoder
+            .send_contract_source(depth, self.frame_manager.current_id(), bytecode);
+        // }
     }
 }
 
@@ -402,7 +381,8 @@ where
         self.frame_manager.current_increment_step_count();
         // flush 移到 step_end，确保 gas_cost 回填后再发送
         // 记录当前 step 计数供 LogTracer 使用
-        self.log_tracer.record_current_step_count(self.step_info.step_count);
+        self.log_tracer
+            .record_current_step_count(self.step_info.step_count);
 
         self.step_info.step_count += 1;
     }
@@ -422,7 +402,8 @@ where
             }
         }
         // 发送此步的 gas_cost 给前端
-        self.encoder.backfill_gas_cost(self.gas_tracer.get_gas_cost());
+        self.encoder
+            .backfill_gas_cost(self.gas_tracer.get_gas_cost());
 
         self.process_journal_storage(context);
         // 只在 SLOAD/TLOAD 时才需要读栈顶，避免每步都做 Vec 堆分配

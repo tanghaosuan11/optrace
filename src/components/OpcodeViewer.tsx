@@ -168,7 +168,13 @@ export function OpcodeViewer({ onStackFieldsToggle, onToggleBreakpoint }: Opcode
 
   // 处理搜索输入
   const handleSearch = () => {
-    const pc = parseInt(searchPc);
+    // 支持十六进制（0x...）和十进制
+    let pc: number;
+    if (searchPc.trim().toLowerCase().startsWith("0x")) {
+      pc = parseInt(searchPc, 16);
+    } else {
+      pc = parseInt(searchPc, 10);
+    }
     if (!isNaN(pc)) {
       jumpToPc(pc);
     }
@@ -253,8 +259,8 @@ export function OpcodeViewer({ onStackFieldsToggle, onToggleBreakpoint }: Opcode
           </div>
           <div className="flex items-center gap-1">
             <Input
-              type="number"
-              placeholder="PC..."
+              type="text"
+              placeholder="PC (0x... or dec)"
               value={searchPc}
               onChange={(e) => setSearchPc(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleSearch()}
@@ -278,7 +284,16 @@ export function OpcodeViewer({ onStackFieldsToggle, onToggleBreakpoint }: Opcode
                   aria-label="Opcode Info"
                   className="cursor-pointer hover:opacity-70"
                   onClick={() => {
-                    const pcVal = searchPc !== "" ? parseInt(searchPc) : currentPc;
+                    let pcVal: number;
+                    if (searchPc !== "") {
+                      if (searchPc.trim().toLowerCase().startsWith("0x")) {
+                        pcVal = parseInt(searchPc, 16);
+                      } else {
+                        pcVal = parseInt(searchPc, 10);
+                      }
+                    } else {
+                      pcVal = currentPc;
+                    }
                     if (pcVal < 0 || isNaN(pcVal)) return;
                     const target = opcodes.find((o) => o.pc === pcVal);
                     if (!target) return;
@@ -460,7 +475,7 @@ export function OpcodeViewer({ onStackFieldsToggle, onToggleBreakpoint }: Opcode
                       <span className="mr-1 text-blue-600 dark:text-blue-400">▶</span>
                     )}
                     <div className="w-16 font-mono text-[11px] text-muted-foreground flex-shrink-0">
-                      {opcode.pc}
+                      0x{opcode.pc.toString(16).padStart(4, '0')}
                     </div>
                     <div className="w-24 font-mono text-[11px] font-medium flex-shrink-0">
                       {opcode.name}

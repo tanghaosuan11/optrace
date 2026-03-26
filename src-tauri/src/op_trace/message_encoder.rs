@@ -13,7 +13,7 @@ enum MsgType {
     ContractSource = 2,
     ContextUpdateAddress = 3,
     Logs = 4,
-    MemoryUpdate = 5,
+    // MemoryUpdate = 5,
     ReturnData = 6,
     StorageChange = 7,
     FrameEnter = 8,
@@ -231,23 +231,6 @@ impl MessageEncoder {
         packet.push(MsgType::ContextUpdateAddress as u8);
         packet.extend_from_slice(&context_id.to_be_bytes());
         packet.extend_from_slice(address.as_slice());
-        let _ = self.channel.send(InvokeResponseBody::Raw(packet));
-    }
-
-    /// 发送 MemoryUpdate（增量内存变更）
-    pub fn send_memory_update(
-        &self,
-        context_id: u16,
-        frame_step: usize,
-        dst_offset: u32,
-        memory: &[u8],
-    ) {
-        let mut packet = Vec::with_capacity(1 + 2 + 8 + 4 + memory.len());
-        packet.push(MsgType::MemoryUpdate as u8);
-        packet.extend_from_slice(&context_id.to_be_bytes());
-        packet.extend_from_slice(&frame_step.to_be_bytes());
-        packet.extend_from_slice(&dst_offset.to_be_bytes());
-        packet.extend_from_slice(memory);
         let _ = self.channel.send(InvokeResponseBody::Raw(packet));
     }
 

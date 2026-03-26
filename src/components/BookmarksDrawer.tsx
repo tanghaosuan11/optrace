@@ -106,7 +106,7 @@ function BreakpointRow({
       <span className="w-2 h-2 rounded-full bg-red-500 shrink-0" />
       {/* PC */}
       <span className="w-14 font-mono text-[11px] text-muted-foreground shrink-0">
-        {pc}
+        0x{pc.toString(16).padStart(4, '0')}
       </span>
       {/* Label input */}
       <Input

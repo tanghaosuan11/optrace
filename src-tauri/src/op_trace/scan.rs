@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 /// 单条条件断点
 #[derive(Deserialize)]
 pub struct ScanCondition {
-    pub id: String,
+    pub _id: String,
     #[serde(rename = "type")]
     pub cond_type: String, // "sstore_slot" | "sload_slot" | "call_address" | "call_selector" | "log_topic" | "contract_address" | "target_address"
     pub value: String,     // hex string
@@ -18,7 +18,7 @@ pub struct ScanCondition {
 /// 条件组（组内 AND/OR，组间 OR）
 #[derive(Deserialize)]
 pub struct ConditionGroup {
-    pub id: String,
+    pub _id: String,
     /// "AND" | "OR"
     pub logic: String,
     pub conditions: Vec<ScanCondition>,

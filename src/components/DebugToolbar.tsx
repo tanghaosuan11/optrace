@@ -13,6 +13,7 @@ import {
   PauseCondition,
   PAUSE_CONDITION_LABELS,
 } from "@/lib/pauseConditions";
+import { findCallPatterns, MatchResult } from "@/lib/patternMatcher";
 import {
   Select,
   SelectContent,
@@ -85,6 +86,8 @@ export function DebugToolbar({
   const [showPauseOn, setShowPauseOn] = useState(false);
   const [showCond, setShowCond] = useState(false);
   const [showFork, setShowFork] = useState(false);
+  const [showPatterns, setShowPatterns] = useState(false);
+  const [patternResults, setPatternResults] = useState<MatchResult | null>(null);
   const [condType, setCondType] = useState<PauseConditionType>("sstore_slot");
   const [condValue, setCondValue] = useState("");
   const [showProgress, setShowProgress] = useState(true);
@@ -199,6 +202,17 @@ export function DebugToolbar({
         title="Add conditional pause"
       >
         <span className="text-[11px]">PauseCond</span>
+      </Button>
+
+      <div className="w-px h-6 bg-border mx-0.5" />
+      <Button
+        variant={showPatterns ? "secondary" : "ghost"}
+        size="sm"
+        onClick={() => setShowPatterns(v => !v)}
+        className="h-6 px-2"
+        title="Pattern matcher for function calls and patterns"
+      >
+        <span className="text-[11px]">Patterns</span>
       </Button>
 
       <div className="w-px h-6 bg-border mx-0.5" />
@@ -436,6 +450,77 @@ export function DebugToolbar({
             Scan
           </Button>
         </div>
+        );
+      })()}
+
+      {/* Pattern Matcher — 识别函数调用模式 */}
+      {showPatterns && (() => {
+        const patternOptions = [
+          { id: 'call_func', label: 'CallFunc', description: 'Function call pattern: PUSH4 EQ PUSH1 JUMPI' },
+        ];
+        return (
+          <div className="flex items-center gap-1.5 px-2 py-1 border-b bg-muted/30 flex-wrap">
+            <span className="text-xs text-muted-foreground shrink-0">Patterns:</span>
+            {patternOptions.map(({ id, label, description }) => (
+              <Button
+                key={id}
+                size="sm"
+                variant={patternResults?.pc.length ? "default" : "outline"}
+                className="h-6 px-2 text-xs"
+                title={description}
+                onClick={() => {
+                  const state = useDebugStore.getState();
+                  const instructionStrings = state.opcodes.map(op => 
+                    op.data ? `${op.name} ${op.data}` : op.name
+                  );
+                  
+                  // 从当前调用帧的 input (calldata) 中提取 selector（前 10 位：0x + 8 hex chars）
+                  let selector: string | undefined;
+                  if (state.callFrames && state.callFrames.length > 0) {
+                    const currentFrame = state.callFrames[state.callFrames.length - 1];
+                    if (currentFrame.input && currentFrame.input.length >= 10) {
+                      selector = currentFrame.input.slice(0, 10);
+                    }
+                  }
+                  
+                  const results = findCallPatterns(instructionStrings, selector);
+                  // 将索引转换为实际的 PC 地址
+                  const pcResults = {
+                    pc: results.pc.map(index => state.opcodes[index].pc),
+                    matches: results.matches
+                  };
+                  console.log("Pattern match results:", pcResults, "selector:", selector);
+                  setPatternResults(pcResults);
+                }}
+              >
+                {label} {patternResults?.pc.length ? `(${patternResults.pc.length})` : ""}
+              </Button>
+            ))}
+            {patternResults?.pc.length ? (
+              <div className="flex items-center gap-1 ml-2 pl-2 border-l">
+                <span className="text-xs text-muted-foreground">Found at PC:</span>
+                <div className="flex gap-1 flex-wrap max-w-sm">
+                  {patternResults.pc.map((pc) => (
+                    <Button
+                      key={pc}
+                      size="sm"
+                      variant="ghost"
+                      className="h-5 px-1.5 text-[10px] font-mono hover:bg-accent"
+                      onClick={() => {
+                        const state = useDebugStore.getState();
+                        const stepIndex = state.opcodes.findIndex(op => op.pc === pc);
+                        if (stepIndex >= 0) {
+                          state.sync({ currentStepIndex: stepIndex });
+                        }
+                      }}
+                    >
+                      0x{pc.toString(16).padStart(4, '0')}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </div>
         );
       })()}
 

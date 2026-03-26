@@ -222,12 +222,11 @@ impl<Db: Database + 'static> JournalTr for OpTraceJournal<Db> {
 
     fn caller_accounting_journal_entry(
         &mut self,
-        address: Address,
-        old_balance: U256,
-        bump_nonce: bool,
+        _address: Address,
+        _old_balance: U256,
+        _bump_nonce: bool,
     ) {
-        self.journaled_state
-            .caller_accounting_journal_entry(address, old_balance, bump_nonce)
+        // self.journaled_state.caller_accounting_journal_entry(address, old_balance, bump_nonce)
     }
 
     fn balance_incr(
@@ -238,8 +237,8 @@ impl<Db: Database + 'static> JournalTr for OpTraceJournal<Db> {
         self.journaled_state.balance_incr(address, balance)
     }
 
-    fn nonce_bump_journal_entry(&mut self, address: Address) {
-        self.journaled_state.nonce_bump_journal_entry(address)
+    fn nonce_bump_journal_entry(&mut self, _address: Address) {
+        // self.journaled_state.nonce_bump_journal_entry(address)
     }
 
     fn take_logs(&mut self) -> Vec<Log> {
