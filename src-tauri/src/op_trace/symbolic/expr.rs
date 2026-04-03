@@ -1,0 +1,192 @@
+//! EVM 符号表达式树（256-bit 位向量语义）+ SMT-LIB2 序列化
+//!
+//! 设计原则：
+//! - 纯数据结构，不依赖 revm
+//! - `None` 槽位代表具体值（不参与约束），只有 `Some(Expr)` 传播符号
+//! - `Const(String)` 存 64 字符小写十六进制（无前缀），用于已知常量叶子
+
+use serde::Serialize;
+use std::collections::HashSet;
+
+/// 32 字节大端序 → 64 字符小写十六进制（无 0x 前缀）
+#[inline]
+pub(crate) fn bytes32_to_hex64(b: &[u8; 32]) -> String {
+    b.iter().map(|x| format!("{:02x}", x)).collect()
+}
+
+/// EVM 256-bit 符号表达式
+///
+/// 所有值语义均为 mod 2^256 位向量，与 EVM 一致。
+/// 比较运算符的结果也是 BV256（值为 0 或 1），而不是 Bool。
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "op", content = "args")]
+pub enum Expr {
+    /// 具体常量：64 字符小写十六进制，无 0x 前缀
+    Const(String),
+    /// 符号变量，名称如 `"cd_4"`（calldata 偏移 4）
+    Sym(String),
+
+    // arithmetic
+    Add(Box<Expr>, Box<Expr>),
+    Sub(Box<Expr>, Box<Expr>),
+    Mul(Box<Expr>, Box<Expr>),
+    Div(Box<Expr>, Box<Expr>),    // unsigned DIV
+    Sdiv(Box<Expr>, Box<Expr>),   // signed SDIV
+    Urem(Box<Expr>, Box<Expr>),   // unsigned MOD
+    Srem(Box<Expr>, Box<Expr>),   // signed SMOD
+    Addmod(Box<Expr>, Box<Expr>, Box<Expr>),
+    Mulmod(Box<Expr>, Box<Expr>, Box<Expr>),
+    Exp(Box<Expr>, Box<Expr>),
+    Signext(Box<Expr>, Box<Expr>), // SIGNEXTEND(b, x): sign-extend x from (b*8+8)th bit
+
+    // bitwise
+    And(Box<Expr>, Box<Expr>),
+    Or(Box<Expr>, Box<Expr>),
+    Xor(Box<Expr>, Box<Expr>),
+    Not(Box<Expr>),
+    /// SHL: (shift_amount, value) — EVM: stack[0]=shift, stack[1]=value
+    Shl(Box<Expr>, Box<Expr>),
+    /// SHR logical: (shift_amount, value)
+    Shr(Box<Expr>, Box<Expr>),
+    /// SAR arithmetic: (shift_amount, value)
+    Sar(Box<Expr>, Box<Expr>),
+    /// BYTE(i, x): extract byte i (MSB = 0) of x, zero-extend to 256 bits
+    Byteop(Box<Expr>, Box<Expr>),
+
+    // comparison (BV256, 0 or 1)
+    Lt(Box<Expr>, Box<Expr>),
+    Gt(Box<Expr>, Box<Expr>),
+    Slt(Box<Expr>, Box<Expr>),
+    Sgt(Box<Expr>, Box<Expr>),
+    Eq(Box<Expr>, Box<Expr>),
+    Iszero(Box<Expr>),
+
+    // hash (opaque; Z3 uses uninterpreted constant)
+    /// Keccak256(uid, inputs): uid 是每次调用的唯一 ID，Z3 中声明为常量
+    Keccak(u32, Vec<Expr>),
+}
+
+impl Expr {
+    /// 从 32 字节大端序构建常量叶子
+    #[inline]
+    pub fn konst(bytes: [u8; 32]) -> Self {
+        Expr::Const(bytes32_to_hex64(&bytes))
+    }
+
+    /// 判断是否不含任何 Symbol（即纯具体值）
+    pub fn is_concrete(&self) -> bool {
+        self.symbols().is_empty()
+    }
+
+    /// 收集所有叶子 Symbol 变量名
+    pub fn symbols(&self) -> HashSet<String> {
+        let mut out = HashSet::new();
+        self.collect_symbols(&mut out);
+        out
+    }
+
+    fn collect_symbols(&self, out: &mut HashSet<String>) {
+        match self {
+            Expr::Sym(n)   => { out.insert(n.clone()); }
+            Expr::Const(_) => {}
+            Expr::Not(a) | Expr::Iszero(a) => a.collect_symbols(out),
+            Expr::Keccak(_, ch) => ch.iter().for_each(|c| c.collect_symbols(out)),
+            Expr::Add(a,b)  | Expr::Sub(a,b)  | Expr::Mul(a,b)  | Expr::Div(a,b)
+            | Expr::Sdiv(a,b) | Expr::Urem(a,b) | Expr::Srem(a,b)
+            | Expr::Exp(a,b) | Expr::Signext(a,b)
+            | Expr::And(a,b) | Expr::Or(a,b)  | Expr::Xor(a,b)
+            | Expr::Shl(a,b) | Expr::Shr(a,b) | Expr::Sar(a,b) | Expr::Byteop(a,b)
+            | Expr::Lt(a,b)  | Expr::Gt(a,b)  | Expr::Slt(a,b) | Expr::Sgt(a,b)
+            | Expr::Eq(a,b) => { a.collect_symbols(out); b.collect_symbols(out); }
+            Expr::Addmod(a,b,c) | Expr::Mulmod(a,b,c) => {
+                a.collect_symbols(out); b.collect_symbols(out); c.collect_symbols(out);
+            }
+        }
+    }
+
+    /// 收集所有 Keccak 节点的唯一 UID（供 SMT-LIB2 声明用）
+    pub fn keccak_uids(&self) -> HashSet<u32> {
+        let mut out = HashSet::new();
+        self.collect_keccak(&mut out);
+        out
+    }
+
+    fn collect_keccak(&self, out: &mut HashSet<u32>) {
+        match self {
+            Expr::Keccak(uid, ch) => {
+                out.insert(*uid);
+                ch.iter().for_each(|c| c.collect_keccak(out));
+            }
+            Expr::Const(_) | Expr::Sym(_) => {}
+            Expr::Not(a) | Expr::Iszero(a) => a.collect_keccak(out),
+            Expr::Add(a,b)  | Expr::Sub(a,b)  | Expr::Mul(a,b)  | Expr::Div(a,b)
+            | Expr::Sdiv(a,b) | Expr::Urem(a,b) | Expr::Srem(a,b)
+            | Expr::Exp(a,b) | Expr::Signext(a,b)
+            | Expr::And(a,b) | Expr::Or(a,b)  | Expr::Xor(a,b)
+            | Expr::Shl(a,b) | Expr::Shr(a,b) | Expr::Sar(a,b) | Expr::Byteop(a,b)
+            | Expr::Lt(a,b)  | Expr::Gt(a,b)  | Expr::Slt(a,b) | Expr::Sgt(a,b)
+            | Expr::Eq(a,b) => { a.collect_keccak(out); b.collect_keccak(out); }
+            Expr::Addmod(a,b,c) | Expr::Mulmod(a,b,c) => {
+                a.collect_keccak(out); b.collect_keccak(out); c.collect_keccak(out);
+            }
+        }
+    }
+
+
+    /// 将表达式转为 SMT-LIB2 项（256-bit bitvector）
+    pub fn to_smt2(&self) -> String {
+        match self {
+            Expr::Const(h) => format!("#x{}", h),
+            Expr::Sym(n)   => n.clone(),
+
+            // 算术
+            Expr::Add(a,b)  => fmt2("bvadd",  a, b),
+            Expr::Sub(a,b)  => fmt2("bvsub",  a, b),
+            Expr::Mul(a,b)  => fmt2("bvmul",  a, b),
+            Expr::Div(a,b)  => fmt2("bvudiv", a, b),
+            Expr::Sdiv(a,b) => fmt2("bvsdiv", a, b),
+            Expr::Urem(a,b) => fmt2("bvurem", a, b),
+            Expr::Srem(a,b) => fmt2("bvsrem", a, b),
+            Expr::Addmod(a,b,c) => format!("(bvurem (bvadd {} {}) {})", a.to_smt2(), b.to_smt2(), c.to_smt2()),
+            Expr::Mulmod(a,b,c) => format!("(bvurem (bvmul {} {}) {})", a.to_smt2(), b.to_smt2(), c.to_smt2()),
+            // EXP / SIGNEXTEND: Z3 无内建 BV pow，用 UF（不透明函数）建模
+            Expr::Exp(a,b)     => format!("(evm_exp {} {})",     a.to_smt2(), b.to_smt2()),
+            Expr::Signext(b,x) => format!("(evm_signext {} {})", b.to_smt2(), x.to_smt2()),
+
+            // 位运算
+            Expr::And(a,b) => fmt2("bvand",  a, b),
+            Expr::Or(a,b)  => fmt2("bvor",   a, b),
+            Expr::Xor(a,b) => fmt2("bvxor",  a, b),
+            Expr::Not(a)   => format!("(bvnot {})", a.to_smt2()),
+            // EVM SHL(shift, val) → SMT bvshl(val, shift)
+            Expr::Shl(sh, v) => format!("(bvshl {} {})",  v.to_smt2(), sh.to_smt2()),
+            Expr::Shr(sh, v) => format!("(bvlshr {} {})", v.to_smt2(), sh.to_smt2()),
+            Expr::Sar(sh, v) => format!("(bvashr {} {})", v.to_smt2(), sh.to_smt2()),
+            Expr::Byteop(i,x) => format!("(evm_byte {} {})", i.to_smt2(), x.to_smt2()),
+
+            // 比较：EVM 返回 0/1 (BV256)，SMT 返回 Bool → 用 ite 包装
+            Expr::Lt(a,b)  => ite("bvult", a, b),
+            Expr::Gt(a,b)  => ite("bvugt", a, b),
+            Expr::Slt(a,b) => ite("bvslt", a, b),
+            Expr::Sgt(a,b) => ite("bvsgt", a, b),
+            Expr::Eq(a,b)  => format!("(ite (= {} {}) (_ bv1 256) (_ bv0 256))",
+                                      a.to_smt2(), b.to_smt2()),
+            Expr::Iszero(a) => format!("(ite (= {} #x{}) (_ bv1 256) (_ bv0 256))",
+                                       a.to_smt2(), "0".repeat(64)),
+
+            // 哈希：引用已在头部声明的无解释常量 keccak_<uid>
+            Expr::Keccak(uid, _) => format!("keccak_{}", uid),
+        }
+    }
+}
+
+#[inline]
+fn fmt2(op: &str, a: &Expr, b: &Expr) -> String {
+    format!("({} {} {})", op, a.to_smt2(), b.to_smt2())
+}
+
+#[inline]
+fn ite(cmp_op: &str, a: &Expr, b: &Expr) -> String {
+    format!("(ite ({} {} {}) (_ bv1 256) (_ bv0 256))",
+            cmp_op, a.to_smt2(), b.to_smt2())
+}

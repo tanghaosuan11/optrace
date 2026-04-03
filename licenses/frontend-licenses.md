@@ -1,0 +1,31 @@
+- [@hpcc-js/wasm@2.33.2](https://github.com/hpcc-systems/hpcc-js-wasm) - Apache-2.0
+- [@monaco-editor/react@4.7.0](https://github.com/suren-atoyan/monaco-react) - MIT
+- [@radix-ui/react-checkbox@1.3.3](https://github.com/radix-ui/primitives) - MIT
+- [@radix-ui/react-context-menu@2.2.16](https://github.com/radix-ui/primitives) - MIT
+- [@radix-ui/react-dialog@1.1.15](https://github.com/radix-ui/primitives) - MIT
+- [@radix-ui/react-label@2.1.8](https://github.com/radix-ui/primitives) - MIT
+- [@radix-ui/react-popover@1.1.15](https://github.com/radix-ui/primitives) - MIT
+- [@radix-ui/react-select@2.2.6](https://github.com/radix-ui/primitives) - MIT
+- [@radix-ui/react-slider@1.3.6](https://github.com/radix-ui/primitives) - MIT
+- [@radix-ui/react-slot@1.2.4](https://github.com/radix-ui/primitives) - MIT
+- [@radix-ui/react-tabs@1.1.13](https://github.com/radix-ui/primitives) - MIT
+- [@radix-ui/react-toast@1.2.15](https://github.com/radix-ui/primitives) - MIT
+- [@radix-ui/react-tooltip@1.2.8](https://github.com/radix-ui/primitives) - MIT
+- [@tanstack/react-virtual@3.13.18](https://github.com/TanStack/virtual) - MIT
+- [@tauri-apps/api@2.10.1](https://github.com/tauri-apps/tauri) - Apache-2.0 OR MIT
+- [@tauri-apps/plugin-opener@2.5.3](https://github.com/tauri-apps/plugins-workspace) - MIT OR Apache-2.0
+- [@tauri-apps/plugin-store@2.4.2](https://github.com/tauri-apps/plugins-workspace) - MIT OR Apache-2.0
+- [class-variance-authority@0.7.1](https://github.com/joe-bell/cva) - Apache-2.0
+- [clsx@2.1.1](https://github.com/lukeed/clsx) - MIT
+- [lucide-react@0.562.0](https://github.com/lucide-icons/lucide) - ISC
+- [monaco-editor@0.55.1](https://github.com/microsoft/monaco-editor) - MIT
+- [next-themes@0.4.6](https://github.com/pacocoursey/next-themes) - MIT
+- [optrace@0.1.7](undefined) - UNLICENSED
+- [pixi.js@8.17.1](https://github.com/pixijs/pixijs) - MIT
+- [react-dom@19.2.3](https://github.com/facebook/react) - MIT
+- [react-resizable-panels@4.7.3](https://github.com/bvaughn/react-resizable-panels) - MIT
+- [react@19.2.3](https://github.com/facebook/react) - MIT
+- [sonner@2.0.7](https://github.com/emilkowalski/sonner) - MIT
+- [tailwind-merge@3.4.0](https://github.com/dcastil/tailwind-merge) - MIT
+- [viem@2.44.4](https://github.com/wevm/viem) - MIT
+- [zustand@5.0.11](https://github.com/pmndrs/zustand) - MIT

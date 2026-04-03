@@ -1,63 +1,52 @@
-/**
- * 条件断点（Conditional Pause）
- *
- * PauseCondition 描述一条断点规则。
- * checkPauseCondition() 在每步执行时调用，返回命中的描述字符串或 null。
- *
- * 规则类型：
- *   sstore_slot       — 写入指定 storage slot 时暂停
- *   sload_slot        — 读取指定 storage slot 时暂停
- *   call_address      — CALL/STATICCALL/DELEGATECALL 目标地址匹配时暂停
- *   call_selector     — CALL/STATICCALL/DELEGATECALL 且 calldata 前 4 字节匹配时暂停
- *   log_topic         — LOG1~LOG4 且 topic[0] 匹配时暂停
- *   contract_address  — 当前执行合约地址匹配时，该合约内所有步骤均命中
- *   target_address    — 当前 frame 的 call target 地址匹配时，该 frame 内所有步骤均命中
- */
+/** 条件扫描与命中结果相关类型/工具函数 */
 
 import type { StepData } from "./stepPlayer";
 
-/* ── 类型定义 ──────────────────────────────────────────────────── */
+/* Types */
 
 export type PauseConditionType =
+  | "sstore_key"
+  | "sstore_value"
+  | "sload_key"
+  | "sload_value"
+  /** @deprecated 使用 sstore_key */
   | "sstore_slot"
+  /** @deprecated 使用 sload_key */
   | "sload_slot"
   | "call_address"
   | "call_selector"
   | "log_topic"
   | "contract_address"
-  | "target_address";
+  | "target_address"
+  | "frame_call_address";
 
 export interface PauseCondition {
   id: string;
   type: PauseConditionType;
-  /** 主匹配值（slot hex / address / selector / topic） */
+  /** 匹配值（slot/address/selector/topic） */
   value: string;
-  /** 是否启用，false 时跳过 */
+  /** 是否启用 */
   enabled: boolean;
 }
 
-/**
- * 条件树节点。
- *  - leaf: 单条条件
- *  - compound: 两个子节点用 AND/OR 合并（最多嵌套 1 层，即最多 3 叶子）
- */
+/** 条件树节点 */
 export type CondNode =
   | { kind: "leaf"; id: string; cond: PauseCondition }
   | { kind: "compound"; id: string; op: "AND" | "OR"; left: CondNode; right: CondNode };
 
-/** 从树中收集所有叶子 PauseCondition */
+/** 收集叶子条件 */
 export function collectLeaves(node: CondNode): PauseCondition[] {
   if (node.kind === "leaf") return [node.cond];
   return [...collectLeaves(node.left), ...collectLeaves(node.right)];
 }
 
-/** 条件树中叶子节点数量 */
+/** 叶子数量 */
 export function leafCount(node: CondNode): number {
   if (node.kind === "leaf") return 1;
   return leafCount(node.left) + leafCount(node.right);
 }
 
-/** 条件组：组内 AND/OR，组间始终 OR（保留以兼容 Rust 接口） */
+/** 条件组（组内 AND/OR，组间 OR） */
 export interface ConditionGroup {
   id: string;
   /** "AND" | "OR" */
@@ -66,6 +55,10 @@ export interface ConditionGroup {
 }
 
 export const PAUSE_CONDITION_LABELS: Record<PauseConditionType, string> = {
+  sstore_key: "SSTORE key",
+  sstore_value: "SSTORE value",
+  sload_key: "SLOAD key",
+  sload_value: "SLOAD value",
   sstore_slot: "SSTORE slot",
   sload_slot: "SLOAD slot",
   call_address: "Call address",
@@ -73,25 +66,28 @@ export const PAUSE_CONDITION_LABELS: Record<PauseConditionType, string> = {
   log_topic: "LOG topic",
   contract_address: "Contract addr",
   target_address: "Target addr",
+  frame_call_address: "Frame call addr",
 };
 
-/* ── opcode 常量 ───────────────────────────────────────────────── */
+/* Opcode bytes used in UI */
 
 const OP_SSTORE       = 0x55;
 const OP_SLOAD        = 0x54;
+const OP_TLOAD        = 0x5c;
+const OP_TSTORE       = 0x5d;
 const OP_CALL         = 0xf1;
 const OP_STATICCALL   = 0xfa;
 const OP_DELEGATECALL = 0xf4;
 const OP_LOG1         = 0xa1;
 const OP_LOG4         = 0xa4;
 
-/* ── 规范化 hex 字符串（统一小写，去 0x 前缀，不补齐）────────── */
+/** 规范化 hex（小写，去 0x） */
 
 function normalizeHex(s: string): string {
   return s.toLowerCase().replace(/^0x/, "");
 }
 
-/* ── 从 StepData 的部分栈字段取 hex ─────────────────────────── */
+/** 读取 StepData 的栈值（hex） */
 
 function partialStackHex(step: StepData, pos: number): string | null {
   let v: string | undefined;
@@ -102,13 +98,7 @@ function partialStackHex(step: StepData, pos: number): string | null {
   return normalizeHex(v);
 }
 
-/* ── 主检测函数 ────────────────────────────────────────────────── */
-
-/**
- * 检测当前步骤是否命中条件组。组内 AND/OR，组间 OR。
- * 注意：stack 是步骤执行**前**的状态。
- * @returns 命中时返回描述字符串，否则 null
- */
+/** 检查当前步骤是否命中条件组 */
 export function checkPauseConditions(
   step: StepData,
   groups: ConditionGroup[]
@@ -146,16 +136,34 @@ function checkSingleCondition(
   target: string,
 ): string | null {
   switch (type) {
+    case "sstore_key":
     case "sstore_slot": {
-      if (op !== OP_SSTORE) return null;
+      if (op !== OP_SSTORE && op !== OP_TSTORE) return null;
       const slot = partialStackHex(step, 0);
-      if (slot !== null && slot === target.padStart(64, "0").slice(-64)) return `SSTORE slot 0x${target}`;
+      if (slot !== null && slot === target.padStart(64, "0").slice(-64)) {
+        return op === OP_SSTORE ? `SSTORE key 0x${target}` : `TSTORE key 0x${target}`;
+      }
       return null;
     }
+    case "sstore_value": {
+      if (op !== OP_SSTORE && op !== OP_TSTORE) return null;
+      const v = partialStackHex(step, 1);
+      if (v !== null && v === target.padStart(64, "0").slice(-64)) {
+        return op === OP_SSTORE ? `SSTORE value 0x${target}` : `TSTORE value 0x${target}`;
+      }
+      return null;
+    }
+    case "sload_key":
     case "sload_slot": {
-      if (op !== OP_SLOAD) return null;
+      if (op !== OP_SLOAD && op !== OP_TLOAD) return null;
       const slot = partialStackHex(step, 0);
-      if (slot !== null && slot === target.padStart(64, "0").slice(-64)) return `SLOAD slot 0x${target}`;
+      if (slot !== null && slot === target.padStart(64, "0").slice(-64)) {
+        return op === OP_SLOAD ? `SLOAD key 0x${target}` : `TLOAD key 0x${target}`;
+      }
+      return null;
+    }
+    case "sload_value": {
+      // 依赖后端 storage_changes
       return null;
     }
     case "call_address": {
@@ -181,55 +189,139 @@ function checkSingleCondition(
       if (topic !== null && topic === target.padStart(64, "0").slice(-64)) return `LOG topic 0x${target}`;
       return null;
     }
-    // contract_address and target_address are per-frame conditions;
-    // checkSingleCondition is used only for live step playback where we don't have frame address data.
-    // These are handled purely by the Rust backend scan.
+    // 帧级字段由后端扫描
     case "contract_address":
     case "target_address":
+    case "frame_call_address":
       return null;
   }
 }
 
-/* ── 扫描命中结果 ──────────────────────────────────────────────── */
+/* Scan hits */
 
 export interface ScanHit {
   step_index: number;
+  transaction_id: number;
   context_id: number;
   pc: number;
   opcode: number;
   description: string;
+  /** 命中条件类型，与 PauseConditionType 一致；AND 组合时为多条 */
+  cond_types?: string[];
 }
 
-/**
- * 对单个叶子条件调用 Rust 扫描，返回命中步骤集合。
- */
-async function scanLeaf(cond: PauseCondition): Promise<Set<number>> {
+/** 条件类型转主类/子类 */
+export function condTypeToMainSub(condType: string): { main: string; sub: string } {
+  const legacy: Record<string, { main: string; sub: string }> = {
+    sstore_slot: { main: "sstore", sub: "key" },
+    sload_slot: { main: "sload", sub: "key" },
+  };
+  if (legacy[condType]) return legacy[condType];
+  const i = condType.indexOf("_");
+  if (i <= 0) return { main: condType, sub: "" };
+  return { main: condType.slice(0, i), sub: condType.slice(i + 1) };
+}
+
+/** 去掉描述里的类型前缀，仅保留细节 */
+export function scanHitDetailOnly(description: string, condTypes?: string[]): string {
+  if (!condTypes?.length) return description;
+  const chunks = description.split(/\s+AND\s+/);
+  if (chunks.length !== condTypes.length) return description;
+  return chunks
+    .map((chunk, i) => stripScanDescriptionPrefix(chunk.trim(), condTypes[i]))
+    .join(" · ");
+}
+
+function stripScanDescriptionPrefix(s: string, condType: string): string {
+  const re: Record<string, RegExp> = {
+    sstore_key: /^(SSTORE|TSTORE)\s+key\s+slot\s+/i,
+    sstore_slot: /^(SSTORE|TSTORE)\s+key\s+slot\s+/i,
+    sstore_value: /^(SSTORE|TSTORE)\s+value\s+/i,
+    sload_key: /^(SLOAD|TLOAD)\s+key\s+slot\s+/i,
+    sload_slot: /^(SLOAD|TLOAD)\s+key\s+slot\s+/i,
+    sload_value: /^(SLOAD|TLOAD)\s+loaded\s+value\s+/i,
+    call_address: /^(CALL|STATICCALL|DELEGATECALL)\s+→\s+/i,
+    call_selector: /^(CALL|STATICCALL|DELEGATECALL)\s+selector\s+/i,
+    log_topic: /^LOG\s+topic\s+/i,
+    contract_address: /^Contract\s+/i,
+    target_address: /^Target\s+/i,
+    frame_call_address: /^Frame\s+call\s+target\s+/i,
+  };
+  const pattern = re[condType];
+  if (!pattern) return s;
+  return s.replace(pattern, "").trim();
+}
+
+interface ScanConditionPayload {
+  _id: string;
+  type: PauseConditionType;
+  value: string;
+  enabled: boolean;
+}
+
+interface ScanGroupPayload {
+  _id: string;
+  logic: "AND" | "OR";
+  conditions: ScanConditionPayload[];
+}
+
+function toScanCondition(cond: PauseCondition): ScanConditionPayload {
+  return {
+    _id: cond.id,
+    type: cond.type,
+    value: cond.value,
+    enabled: cond.enabled,
+  };
+}
+
+function toScanGroup(group: ConditionGroup): ScanGroupPayload {
+  return {
+    _id: group.id,
+    logic: group.logic,
+    conditions: group.conditions.map(toScanCondition),
+  };
+}
+
+/** 扫描单个叶子条件 */
+async function scanLeaf(
+  cond: PauseCondition,
+  sessionId?: string,
+  transactionId?: number | null,
+): Promise<Set<number>> {
   if (!cond.enabled) return new Set();
   const { invoke } = await import("@tauri-apps/api/core");
-  const hits: ScanHit[] = await invoke("scan_conditions", {
-    conditions: [{ id: "leaf", logic: "OR", conditions: [cond] }],
-  });
+  const payload: Record<string, unknown> = {
+    sessionId,
+    conditions: [{ _id: "leaf", logic: "OR", conditions: [toScanCondition(cond)] }],
+  };
+  if (transactionId != null) payload.transactionId = transactionId;
+  const hits: ScanHit[] = await invoke("scan_conditions", payload);
   return new Set<number>(hits.map(h => h.step_index));
 }
 
-/**
- * 递归对 CondNode 树求命中集合（前端合并）。
- */
-async function evalCondNode(node: CondNode): Promise<{ hitSet: Set<number>; hits: ScanHit[] }> {
+/** 递归扫描 CondNode 树并合并结果 */
+async function evalCondNode(
+  node: CondNode,
+  sessionId?: string,
+  transactionId?: number | null,
+): Promise<{ hitSet: Set<number>; hits: ScanHit[] }> {
   if (node.kind === "leaf") {
-    const hitSet = await scanLeaf(node.cond);
-    // 重新拿 hit 对象（需要完整 ScanHit）
+    const hitSet = await scanLeaf(node.cond, sessionId, transactionId);
+    // 需要完整 ScanHit
     if (hitSet.size === 0) return { hitSet, hits: [] };
     const { invoke } = await import("@tauri-apps/api/core");
-    const hits: ScanHit[] = await invoke("scan_conditions", {
-      conditions: [{ id: "leaf", logic: "OR", conditions: [node.cond] }],
-    });
+    const payload: Record<string, unknown> = {
+      sessionId,
+      conditions: [{ _id: "leaf", logic: "OR", conditions: [toScanCondition(node.cond)] }],
+    };
+    if (transactionId != null) payload.transactionId = transactionId;
+    const hits: ScanHit[] = await invoke("scan_conditions", payload);
     return { hitSet, hits };
   }
 
   const [leftResult, rightResult] = await Promise.all([
-    evalCondNode(node.left),
-    evalCondNode(node.right),
+    evalCondNode(node.left, sessionId, transactionId),
+    evalCondNode(node.right, sessionId, transactionId),
   ]);
 
   let hitSet: Set<number>;
@@ -239,9 +331,9 @@ async function evalCondNode(node: CondNode): Promise<{ hitSet: Set<number>; hits
     hitSet = new Set([...leftResult.hitSet, ...rightResult.hitSet]);
   }
 
-  // 合并 hits，仅保留最终命中步骤的条目
+  // 仅保留最终命中步骤
   const combined = [...leftResult.hits, ...rightResult.hits].filter(h => hitSet.has(h.step_index));
-  // 去重（同一步骤仅保留一条）
+  // 同一步骤去重
   const seen = new Set<number>();
   const hits = combined.filter(h => { if (seen.has(h.step_index)) return false; seen.add(h.step_index); return true; });
   hits.sort((a, b) => a.step_index - b.step_index);
@@ -249,20 +341,20 @@ async function evalCondNode(node: CondNode): Promise<{ hitSet: Set<number>; hits
   return { hitSet, hits };
 }
 
-/**
- * 对 CondNode 列表（多个根节点间 OR）求命中集合，
- * 或对旧 ConditionGroup[] 格式求命中集合（向后兼容）。
- */
+/** 扫描 CondNode[]（新）或 ConditionGroup[]（兼容） */
 export async function rebuildConditionHitSet(
   groupsOrNodes: ConditionGroup[] | CondNode[],
+  sessionId?: string,
+  /** 仅扫描指定 transactionId；空值表示全部 */
+  transactionId?: number | null,
 ): Promise<{ hitSet: Set<number>; hits: ScanHit[] }> {
   if (groupsOrNodes.length === 0) return { hitSet: new Set(), hits: [] };
 
-  // 判断是新 CondNode[] 还是旧 ConditionGroup[]
+  // 新版 CondNode[] / 旧版 ConditionGroup[]
   if ((groupsOrNodes[0] as CondNode).kind !== undefined) {
-    // 新路径：多根节点间 OR 合并
+    // 新路径：多根节点按 OR 合并
     const nodes = groupsOrNodes as CondNode[];
-    const results = await Promise.all(nodes.map(n => evalCondNode(n)));
+    const results = await Promise.all(nodes.map(n => evalCondNode(n, sessionId, transactionId)));
     const hitSet = new Set<number>(results.flatMap(r => [...r.hitSet]));
     const seen = new Set<number>();
     const hits = results.flatMap(r => r.hits)
@@ -271,10 +363,15 @@ export async function rebuildConditionHitSet(
     return { hitSet, hits };
   }
 
-  // 旧路径：直接传 groups 给 Rust（兼容）
+  // 旧路径：直接传 groups 给 Rust
   const groups = groupsOrNodes as ConditionGroup[];
   const { invoke } = await import("@tauri-apps/api/core");
-  const hits: ScanHit[] = await invoke("scan_conditions", { conditions: groups });
+  const legacyPayload: Record<string, unknown> = {
+    sessionId,
+    conditions: groups.map(toScanGroup),
+  };
+  if (transactionId != null) legacyPayload.transactionId = transactionId;
+  const hits: ScanHit[] = await invoke("scan_conditions", legacyPayload);
   const hitSet = new Set<number>(hits.map(h => h.step_index));
   return { hitSet, hits };
 }

@@ -1,6 +1,7 @@
-import { useRef, useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { load } from "@tauri-apps/plugin-store";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ipcCommands } from "@/lib/ipcConfig";
 import { migrateFromLocalStorage } from "@/lib/tauriStore";
 import { initUserFourbyteDb } from "@/lib/userFourbyteDb";
@@ -9,75 +10,88 @@ import { DebugToolbar } from "@/components/DebugToolbar";
 import { DebugPanel } from "@/components/DebugPanel";
 import { TabBar } from "@/components/TabBar";
 import { MainInterface } from "@/components/MainInterface";
-import { TestDialog } from "@/components/TestDialog";
-import { GlobalLogDrawer } from "@/components/GlobalLogDrawer";
-import { UtilitiesDrawer } from "@/components/UtilitiesDrawer";
-import { AnalysisDrawer } from "@/components/AnalysisDrawer";
+import { DrawerHost } from "@/components/DrawerHost";
 import { DataFlowDrawer } from "@/components/DataFlowModal";
+import { CfgWindow } from "@/components/CfgWindow";
 // import { NotesDrawer } from "@/components/NotesDrawer";
 import { BookmarksDrawer } from "@/components/BookmarksDrawer";
-import { CondListDrawer } from "@/components/CondListDrawer";
+import { CondScanDrawer } from "@/components/CondScanDrawer";
+import { FloatingPanelProvider } from "@/components/floating-panel";
 import { Toaster } from "@/components/ui/sonner";
 import "./App.css";
-import { type StepData } from "./lib/stepPlayer";
 import { type CallFrame, type CallTreeNode } from "./lib/types";
 import { useDebugPlayback } from "./hooks/useDebugPlayback";
 import { type TxData, type BlockData } from "./lib/txFetcher";
-import { loadAppConfig, initAppConfig } from "./lib/appConfig";
+import { loadAppConfig, initAppConfig, setConfig } from "./lib/appConfig";
 import { useDebugStore } from "./store/debugStore";
-import { fetchTxAction, startDebugAction, resetAllAction, debugDump } from "./lib/debugActions";
+import { startDebugAction, resetAllAction, debugDump } from "./lib/debugActions";
 import { useNavigation } from "./hooks/useNavigation";
 import { useConditionScan } from "./hooks/useConditionScan";
 import { useBreakpoints } from "./hooks/useBreakpoints";
 import { useTabSync } from "./hooks/useTabSync";
 import { useFourbyteResolver } from "./hooks/useFourbyteResolver";
-import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
-import { registerCommands, unregisterCommands } from "./lib/commands";
+import { useActiveFrameProjection } from "./hooks/useActiveFrameProjection";
+import { useDebugCommandBindings } from "./hooks/useDebugCommandBindings";
+import { useDebugRuntimeRefs } from "./hooks/useDebugRuntimeRefs";
+import { getWindowMode } from "./lib/windowMode";
+import { openCfgWindow } from "./lib/windowActions";
+import { useForkStore } from "./store/forkStore";
+import {
+  aggregateStepsToFrames,
+  emitCfgCurrentStep,
+  emitCfgFrameBatch,
+  emitCfgInit,
+  emitCrossMainStepSync,
+  listenCrossCfgSeqCommit,
+  makeCfgFrameKey,
+  type CfgFrameEntry,
+} from "./lib/cfgBridge";
 
 
 function App() {
-  // 0x68d251ca722d3949d453899b5b515b61b216c1eb726526fcbb7b95e186c54248
-  // 0x4fd0406120dca30ea8e3d7994136e5d5eaac0f67c82441b872731b3973492e1d
-  // 0x6a743ad6fe0e1c9914f355d7294f2cab5b77ca273e3210523f1df0239407f1ea
-  // 0x569733b8016ef9418f0b6bde8c14224d9e759e79301499908ecbcd956a0651f5
-
-  // ── Phase 3.1/3.2: 从 store 读取（不再用 useState）────────
+  const isWhatIfMode = getWindowMode().mode === "whatif";
+  const isCfgMode = getWindowMode().mode === "cfg";
+  const whatIfAutoStartedRef = useRef(false);
+  const whatIfInitReceivedRef = useRef(false);
+  const startDebugRef = useRef<() => void>(() => {});
+  const [whatIfInitStatus, setWhatIfInitStatus] = useState<string>("Waiting for whatif init payload...");
+  const [cfgSessionId, setCfgSessionId] = useState<string>("");
+  // Map<frameKey, CfgFrameEntry> — replaces raw 700k-step array
+  const [cfgFrames, setCfgFrames] = useState<Map<string, CfgFrameEntry>>(new Map());
+  const cfgEmittedIndexRef = useRef(0);
+  // State subscriptions
   const { sync: storeSync } = useDebugStore.getState();
   const activeTab = useDebugStore((s) => s.activeTab);
   const tabHistory = useDebugStore((s) => s.tabHistory);
-  const txData = useDebugStore((s) => s.txData);
-  const blockData = useDebugStore((s) => s.blockData);
   const callFrames = useDebugStore((s) => s.callFrames);
   const currentStepIndex = useDebugStore((s) => s.currentStepIndex);
+  const stepCount = useDebugStore((s) => s.stepCount);
   const breakpointPcsMap = useDebugStore((s) => s.breakpointPcsMap);
   const scanUrl = useDebugStore((s) => s.config.scanUrl);
+  const isDebugUi = useDebugStore((s) => s.config.isDebug);
+  const isPlaying = useDebugStore((s) => s.isPlaying);
+  const sessionIdFromStore = useDebugStore((s) => s.sessionId);
 
-  // 使用 ref 存储数据和状态，避免闭包问题
-  const allStepsRef = useRef<StepData[]>([]);
-  const callFramesRef = useRef<CallFrame[]>([]);
-  const callTreeRef = useRef<CallTreeNode[]>([]);
-  // per-context 步骤索引（方案一：O(log N) seek）
-  const stepIndexByContextRef = useRef<Map<number, number[]>>(new Map());
-  // opcode 步骤索引：opcode → 全局步骤下标数组，用于 O(log N) 跳转
-  const opcodeIndexRef = useRef<Map<number, number[]>>(new Map());
-  const isPlayingRef = useRef(false);
-  const currentStepIndexRef = useRef(-1);
-  const activeTabRef = useRef<string>("main"); // 追踪当前激活的标签
-  const batchSizeRef = useRef(10); // 批量大小，用 ref 避免闭包问题
-
-  // 断点 opcode
-  const breakOpcodesRef = useRef<Set<number>>(new Set());
-
-  // 全量数据缓存（步数 <= fullDataThreshold 时预取）── 暂时禁用，写死 0
-  const fullDataThresholdRef = useRef(0);
-  const fullDataCacheRef = useRef<Array<{
-    step_index: number; context_id: number; pc: number; opcode: number;
-    gas_cost: number; gas_remaining: number; stack: string[]; memory: string;
-  }> | null>(null);
-  // 版本号：IPC 返回时如果版本已变则丢弃（防止旧请求在 stepCount 超阈值后仍写入缓存）
-  const cacheVersionRef = useRef(0);
-  // 防抖 timer：流式接收期间只在最后一次 setStepCount 后才真正发 IPC
-  const cacheTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const {
+    sessionIdRef,
+    allStepsRef,
+    callFramesRef,
+    callTreeRef,
+    messageRuntimeRef,
+    stepIndexByContextRef,
+    opcodeIndexRef,
+    isPlayingRef,
+    currentStepIndexRef,
+    activeTabRef,
+    batchSizeRef,
+    breakOpcodesRef,
+    fullDataThresholdRef,
+    fullDataCacheRef,
+    cacheVersionRef,
+    cacheTimerRef,
+    breakpointPcsRef,
+    conditionHitSetRef,
+  } = useDebugRuntimeRefs();
 
   // 从 Tauri Store 加载各模块缓存 + 迁移 localStorage
   useEffect(() => {
@@ -96,25 +110,259 @@ function App() {
         }
       });
     });
+    if (import.meta.env.DEV) {
+      // @ts-ignore
+      window.invoke = invoke; // for debug
+    }
   }, []);
 
-  // PC 断点（每个 frame 独立）: Map<frameId, Set<pc>>
-  const breakpointPcsRef = useRef<Map<string, Set<number>>>(new Map());
+  useEffect(() => {
+    storeSync({ sessionId: sessionIdRef.current });
+  }, [sessionIdRef, storeSync]);
 
-  // 条件断点
-  const conditionHitSetRef = useRef<Set<number>>(new Set());
+  // 仅 release 下关闭系统默认右键菜单；debug UI 开关可强制启用（便于 Inspect/Reload）
+  useEffect(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (window as any).__OPTRACE_ENABLE_CONTEXT_MENU__ = Boolean(import.meta.env.DEV || isDebugUi);
+  }, [isDebugUi]);
 
-  // 提取的 hooks
-  const { runConditionScan } = useConditionScan(conditionHitSetRef);
+  // Window close -> release backend session
+  // CFG / readonly windows do NOT own the session — skip reset to avoid
+  // deleting a session that the main debug window still needs.
+  useEffect(() => {
+    if (isCfgMode || getWindowMode().readonly) return;
+    const w = getCurrentWindow();
+    const unlistenP = w.onCloseRequested(() => {
+      invoke(ipcCommands.resetSession, { sessionId: sessionIdRef.current }).catch(() => {});
+    });
+    return () => {
+      unlistenP.then((unlisten) => unlisten()).catch(() => {});
+    };
+  }, [sessionIdRef, isCfgMode]);
+
+  // Window init payload (fork/whatif)
+  useEffect(() => {
+    const w = getCurrentWindow();
+    const unlistenP = w.listen<{ tx?: string; txData?: TxData; blockData?: BlockData; condNodes?: unknown; forkPatches?: unknown; rpcUrl?: string }>(
+      "optrace:init",
+      (ev) => {
+        const p = ev.payload || {};
+        whatIfInitReceivedRef.current = true;
+        console.log("[whatif.init] received optrace:init", {
+          isWhatIfMode,
+          hasTx: !!p.tx,
+          hasTxData: !!p.txData,
+          hasBlockData: !!p.blockData,
+          condNodesLen: Array.isArray((p as any).condNodes) ? (p as any).condNodes.length : undefined,
+          forkPatchesLen: Array.isArray((p as any).forkPatches) ? (p as any).forkPatches.length : undefined,
+          rpcUrl: p.rpcUrl ? "(set)" : "(unset)",
+        });
+        setWhatIfInitStatus("Init payload received.");
+        if (p.tx && p.txData && p.blockData) {
+          const h = (p.tx as string).trim().startsWith("0x") ? (p.tx as string).trim() : `0x${p.tx}`;
+          storeSync({
+            tx: h.startsWith("0x") ? h.slice(2) : h,
+            txData: p.txData as TxData,
+            blockData: p.blockData as BlockData,
+            txSlots: [
+              {
+                hash: h,
+                txData: p.txData as TxData,
+                blockData: p.blockData as BlockData,
+                error: "",
+                isFetching: false,
+              },
+            ],
+          });
+        } else {
+          if (p.tx) storeSync({ tx: p.tx });
+          if (p.txData) storeSync({ txData: p.txData as TxData });
+          if (p.blockData) storeSync({ blockData: p.blockData as BlockData });
+        }
+        if (p.condNodes) storeSync({ condNodes: p.condNodes as any });
+        if (p.forkPatches) useForkStore.setState({ patches: p.forkPatches as any });
+        if (p.rpcUrl) {
+          const next = setConfig({ rpcUrl: p.rpcUrl, forkMode: true });
+          storeSync({ config: next });
+        } else if (isWhatIfMode) {
+          const next = setConfig({ forkMode: true });
+          storeSync({ config: next });
+        }
+        const missing: string[] = [];
+        if (!p.tx) missing.push("tx");
+        if (!p.txData) missing.push("txData");
+        if (!p.blockData) missing.push("blockData");
+        if (missing.length > 0) {
+          setWhatIfInitStatus(`Init payload missing required fields: ${missing.join(", ")}`);
+          return;
+        }
+        if (isWhatIfMode && !whatIfAutoStartedRef.current) {
+          whatIfAutoStartedRef.current = true;
+          console.log("[whatif.init] autostart startDebug()");
+          setWhatIfInitStatus("Starting trace...");
+          setTimeout(() => {
+            startDebugRef.current();
+          }, 0);
+        }
+      },
+    );
+    return () => {
+      unlistenP.then((unlisten) => unlisten()).catch(() => {});
+    };
+  }, [isWhatIfMode, storeSync]);
+
+  useEffect(() => {
+    if (!isCfgMode) return;
+    const w = getCurrentWindow();
+    const unlistenInitP = w.listen<{ sessionId?: string }>("optrace:cfg:init", (ev) => {
+      const sid = (ev.payload?.sessionId || "").trim();
+      if (!sid) return;
+      // Always reset frames on init — this is always a "fresh start" signal
+      // (same sessionId on re-open must also reset, otherwise 3 snapshots×3 = triple counts).
+      setCfgFrames(new Map());
+      setCfgSessionId(sid);
+    });
+    // Receive aggregated frame entries (tiny payload) instead of raw 700k step objects.
+    const unlistenFramesP = w.listen<{ sessionId?: string; frames?: { transactionId: number; contextId: number; count: number }[] }>(
+      "optrace:cfg:frame_batch",
+      (ev) => {
+        const sid = (ev.payload?.sessionId || "").trim();
+        const incoming = Array.isArray(ev.payload?.frames) ? ev.payload!.frames! : [];
+        if (!sid || incoming.length === 0) return;
+        setCfgSessionId((prev) => prev || sid);
+        setCfgFrames((prev) => {
+          const next = new Map(prev);
+          for (const f of incoming) {
+            const k = makeCfgFrameKey(f.transactionId, f.contextId);
+            const e = next.get(k);
+            if (e) {
+              next.set(k, { ...e, count: e.count + f.count });
+            } else {
+              next.set(k, f);
+            }
+          }
+          return next;
+        });
+      },
+    );
+    return () => {
+      unlistenInitP.then((u) => u()).catch(() => {});
+      unlistenFramesP.then((u) => u()).catch(() => {});
+    };
+  }, [isCfgMode]);
+
+  useEffect(() => {
+    if (isCfgMode) return;
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+
+    const all = allStepsRef.current;
+    if (stepCount < cfgEmittedIndexRef.current) cfgEmittedIndexRef.current = 0;
+    const start = cfgEmittedIndexRef.current;
+    if (all.length <= start) return;
+    const slice = all.slice(start);
+    cfgEmittedIndexRef.current = all.length;
+    const frames = aggregateStepsToFrames(
+      slice.map((s, i) => ({
+        stepIndex: start + i,
+        transactionId: s.transactionId ?? 0,
+        contextId: s.contextId,
+        pc: s.pc,
+        opcode: s.opcode,
+        frameStepCount: s.frameStepCount,
+        depth: s.depth,
+      }))
+    );
+    // emit init alongside every batch so late-opened CFG windows can sync
+    void emitCfgInit(sid);
+    void emitCfgFrameBatch(sid, frames);
+  }, [stepCount, isCfgMode, sessionIdRef, allStepsRef]);
+
+  useEffect(() => {
+    if (isCfgMode) return;
+    const sid = sessionIdFromStore || sessionIdRef.current;
+    if (!sid) return;
+    const all = allStepsRef.current;
+    const idx = currentStepIndex;
+    if (idx < 0 || idx >= all.length) {
+      void emitCfgCurrentStep({
+        sessionId: sid,
+        stepIndex: idx,
+        transactionId: 0,
+        contextId: 0,
+      });
+      return;
+    }
+    const s = all[idx];
+    const tx = s.transactionId ?? 0;
+    const ctx = s.contextId;
+    let prevPc: number | undefined;
+    for (let i = idx - 1; i >= 0; i--) {
+      const p = all[i];
+      if ((p.transactionId ?? 0) === tx && p.contextId === ctx) {
+        prevPc = p.pc;
+        break;
+      }
+    }
+    void emitCfgCurrentStep({
+      sessionId: sid,
+      stepIndex: idx,
+      transactionId: tx,
+      contextId: ctx,
+      pc: s.pc,
+      prevPc,
+    });
+  }, [currentStepIndex, isCfgMode, sessionIdFromStore, sessionIdRef, allStepsRef]);
+
+  useEffect(() => {
+    if (isCfgMode) return;
+    const sid = sessionIdFromStore || sessionIdRef.current;
+    if (!sid) return;
+    const all = allStepsRef.current;
+    const idx = currentStepIndex;
+    if (idx < 0 || idx >= all.length) {
+      void emitCrossMainStepSync({
+        sessionId: sid,
+        stepIndex: idx,
+        transactionId: 0,
+        contextId: 0,
+      });
+      return;
+    }
+    const s = all[idx]!;
+    void emitCrossMainStepSync({
+      sessionId: sid,
+      stepIndex: idx,
+      transactionId: s.transactionId ?? 0,
+      contextId: s.contextId,
+    });
+  }, [currentStepIndex, isPlaying, isCfgMode, sessionIdFromStore, sessionIdRef, allStepsRef]);
+
+  useEffect(() => {
+    if (!isWhatIfMode) return;
+    const t = setTimeout(() => {
+      if (!whatIfInitReceivedRef.current) {
+        setWhatIfInitStatus("Init payload not received. Open this window via Fork button, then retry.");
+      }
+    }, 3000);
+    return () => clearTimeout(t);
+  }, [isWhatIfMode]);
+
+  useEffect(() => {
+    if (!isWhatIfMode) return;
+    if (activeTab !== "main") return;
+    if (callFrames.length === 0) return;
+    storeSync({ activeTab: callFrames[0].id });
+  }, [activeTab, callFrames, isWhatIfMode, storeSync]);
+
+  // Hooks
+  const { runConditionScan, clearAllConditions } = useConditionScan(conditionHitSetRef);
   const { handleBreakOpcodesChange, handleToggleBreakpoint } = useBreakpoints(breakOpcodesRef, breakpointPcsRef);
   useTabSync(activeTabRef);
   useFourbyteResolver();
 
-  // ── Store-writing helpers (替代已删除的 useState setters) ────
+  // Store write helpers
   const setActiveTab = useCallback((v: string) => storeSync({ activeTab: v }), []);
-  const setTx = useCallback((v: string) => storeSync({ tx: v }), []);
-  const setTxData = useCallback((v: TxData | null) => storeSync({ txData: v }), []);
-  const setBlockData = useCallback((v: BlockData | null) => storeSync({ blockData: v }), []);
   const setCallTreeNodes = useCallback((v: CallTreeNode[]) => storeSync({ callTreeNodes: v }), []);
   const setIsDebugging = useCallback((v: boolean) => storeSync({ isDebugging: v }), []);
   const setCallFrames = useCallback((v: CallFrame[] | ((prev: CallFrame[]) => CallFrame[])) => {
@@ -139,9 +387,9 @@ function App() {
         fullDataCacheRef.current = null;
         storeSync({ isCacheMode: false });
         invoke<Array<{
-          step_index: number; context_id: number; pc: number; opcode: number;
+          step_index: number; transaction_id: number; context_id: number; pc: number; opcode: number;
           gas_cost: number; gas_remaining: number; stack: string[]; memory: string;
-        }>>(ipcCommands.rangeFullData, { start: 0, end: v - 1 })
+        }>>(ipcCommands.rangeFullData, { start: 0, end: v - 1, sessionId: sessionIdRef.current })
           .then((data) => {
             if (cacheVersionRef.current !== ver) return; // stale：stepCount 已超阈值或新 session
             fullDataCacheRef.current = data;
@@ -172,6 +420,7 @@ function App() {
   // 使用播放 hook
   const { applyStep, stepForward, stepBackward, stepOver, stepOut, togglePlayback, seekTo, reset } = useDebugPlayback(
     {
+      sessionId: sessionIdRef,
       allSteps: allStepsRef,
       callFrames: callFramesRef,
       currentStepIndex: currentStepIndexRef,
@@ -193,35 +442,58 @@ function App() {
     }
   );
 
-  // 注册 applyStep 到 store，供 AnalysisDrawer 等跨组件跳转使用
   useEffect(() => {
-    storeSync({ } as never);
+    if (isCfgMode) return;
+    let unlisten: (() => void) | undefined;
+    listenCrossCfgSeqCommit((payload) => {
+      if (!payload?.sessionId || payload.sessionId !== sessionIdRef.current) return;
+      seekTo(payload.globalStepIndex);
+    })
+      .then((u) => {
+        unlisten = u;
+      })
+      .catch(() => {});
+    return () => {
+      unlisten?.();
+    };
+  }, [isCfgMode, seekTo]);
+
+  // Expose seek callback to store
+  useEffect(() => {
     useDebugStore.getState().registerSeekToStep(applyStep);
     return () => useDebugStore.getState().registerSeekToStep(null);
   }, [applyStep]);
 
-  // Navigation hook
+  // Navigation
   const { navigateTo, seekToWithHistory, navBack, navForward, handleSelectFrame, handleGoBack, resetNav } = useNavigation(seekTo, activeTabRef);
 
-  // 启动调试
+  // Start debug
   const startDebug = useCallback(() => startDebugAction({
+    sessionId: sessionIdRef.current,
     allStepsRef, callFramesRef, callTreeRef, currentStepIndexRef,
     stepIndexByContext: stepIndexByContextRef,
     opcodeIndex: opcodeIndexRef,
+    runtime: messageRuntimeRef.current,
     resetPlayback: reset, applyStep, resetNav,
     setStepCount, setCallFrames, setActiveTab, setIsDebugging,
     setCurrentStepIndex, setIsPlaying,
-  }), [reset, applyStep, resetNav]);
+  }), [reset, applyStep, resetNav, sessionIdRef]);
 
-  // 完全重置
+  useEffect(() => {
+    startDebugRef.current = startDebug;
+  }, [startDebug]);
+
+  // Reset all
   const resetAll = useCallback(() => resetAllAction({
+    sessionId: sessionIdRef.current,
     allStepsRef, callFramesRef, callTreeRef,
     stepIndexByContext: stepIndexByContextRef,
     opcodeIndex: opcodeIndexRef,
+    runtime: messageRuntimeRef.current,
     fullDataCache: fullDataCacheRef,
     resetPlayback: reset,
     resetNav,
-  }), [reset, resetNav]);
+  }), [reset, resetNav, sessionIdRef]);
 
   // Debug dump
   const handleDebugDump = useCallback(
@@ -229,104 +501,67 @@ function App() {
     [],
   );
 
-  // ── 命令注册：将回调绑定到命令注册表，供 useKeyboardShortcuts 调用 ──────────
-  useEffect(() => {
-    registerCommands({
-      "debug.stepInto":    stepForward,
-      "debug.stepOver":    stepOver,
-      "debug.stepOut":     stepOut,
-      "debug.stepBack":    stepBackward,
-      "debug.continue":    togglePlayback,
-      "debug.seekToStart": () => seekTo(0),
-      "debug.seekToEnd":   () => {
-        const total = useDebugStore.getState().stepCount;
-        if (total > 0) seekTo(total - 1);
-      },
-      "nav.back":          navBack,
-      "nav.forward":       navForward,
-      "ui.toggleUtilities": () => {
-        const s = useDebugStore.getState();
-        s.sync({ isUtilitiesOpen: !s.isUtilitiesOpen });
-      },
-      "ui.toggleLogs": () => {
-        const s = useDebugStore.getState();
-        s.sync({ isLogDrawerOpen: !s.isLogDrawerOpen });
-      },
-      "ui.toggleAnalysis": () => {
-        const s = useDebugStore.getState();
-        s.sync({ isAnalysisOpen: !s.isAnalysisOpen });
-      },
-      "ui.toggleBookmarks": () => {
-        const s = useDebugStore.getState();
-        s.sync({ isBookmarksOpen: !s.isBookmarksOpen });
-      },
-      "ui.toggleCondList": () => {
-        const s = useDebugStore.getState();
-        s.sync({ isCondListOpen: !s.isCondListOpen });
-      },
-      "ui.toggleCallTree": () => {
-        const s = useDebugStore.getState();
-        s.sync({ isCallTreeOpen: !s.isCallTreeOpen });
-      },
-    });
-    return () => unregisterCommands([
-      "debug.stepInto", "debug.stepOver", "debug.stepOut",
-      "debug.stepBack", "debug.continue", "debug.seekToStart", "debug.seekToEnd",
-      "nav.back", "nav.forward",
-      "ui.toggleUtilities", "ui.toggleLogs", "ui.toggleAnalysis",
-      "ui.toggleBookmarks", "ui.toggleCondList", "ui.toggleCallTree",
-    ]);
-  }, [stepForward, stepOver, stepOut, stepBackward, togglePlayback, seekTo, navBack, navForward]);
-
-  useKeyboardShortcuts();
+  useDebugCommandBindings({
+    stepForward,
+    stepOver,
+    stepOut,
+    stepBackward,
+    togglePlayback,
+    seekTo,
+    navBack,
+    navForward,
+  });
 
   const activeFrame = callFrames.find((f) => f.id === activeTab);
-
-  // ── 桥接：同步数据到 Zustand store（Phase 1 临时方案）────────
-  useEffect(() => {
-    // 直接从 ref 读取最新数据，applyStep 已原地更新，无需依赖 activeFrame 对象
-    const frame = callFramesRef.current.find(f => f.id === activeTab);
-    if (!frame) return;
-
-    // logs 按 stepIndex 顺序追加，二分截取 <= currentStepIndex 的部分
-    const logs = frame.logs;
-    let logEnd = logs.length;
-    if (logs.length > 0 && logs[logs.length - 1].stepIndex > currentStepIndex) {
-      let lo = 0, hi = logs.length - 1;
-      logEnd = 0;
-      while (lo <= hi) {
-        const mid = (lo + hi) >>> 1;
-        if (logs[mid].stepIndex <= currentStepIndex) { logEnd = mid + 1; lo = mid + 1; }
-        else hi = mid - 1;
-      }
-    }
-
-    // returnDataList 按顺序追加，从尾部倒找第一个 <= currentStepIndex
-    const rdList = frame.returnDataList ?? [];
-    let returnData = "";
-    for (let i = rdList.length - 1; i >= 0; i--) {
-      if (rdList[i].stepIndex <= currentStepIndex) { returnData = rdList[i].data; break; }
-    }
-
-    useDebugStore.getState().sync({
-      opcodes: frame.opcodes,
-      stack: frame.stack,
-      memory: frame.memory,
-      currentPc: frame.currentPc ?? -1,
-      currentGasCost: frame.currentGasCost ?? 0,
-      storageChanges: frame.storageChanges,
-      logs: logs.slice(0, logEnd),
-      returnData,
-      returnError: "",
-      stateDiffs: [],
-      currentStepIndex,
-      breakpointPcs: breakpointPcsMap.get(activeTab) || new Set(),
-      callType: frame.callType,
-      callerAddress: frame.caller,
+  const handleOpenCfgWindow = useCallback(() => {
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    const { window } = openCfgWindow(sid, { readonly: true });
+    console.log("[cfg.send] open", { sid, allSteps: allStepsRef.current.length });
+    // Ensure late-opened cfg window receives existing trace.
+    cfgEmittedIndexRef.current = 0;
+    const sendSnapshot = (tag: string) => {
+      const all = allStepsRef.current;
+      // Aggregate frames instead of sending 700k raw steps over IPC
+      const frames = aggregateStepsToFrames(
+        all.map((s, i) => ({
+          stepIndex: i,
+          transactionId: s.transactionId ?? 0,
+          contextId: s.contextId,
+          pc: s.pc,
+          opcode: s.opcode,
+          frameStepCount: s.frameStepCount,
+          depth: s.depth,
+        }))
+      );
+      console.log("[cfg.send] snapshot", { tag, sid, frames: frames.length, steps: all.length });
+      void emitCfgInit(sid);
+      void emitCfgFrameBatch(sid, frames);
+    };
+    window.once("tauri://created", () => {
+      sendSnapshot("created");
+      setTimeout(() => sendSnapshot("t+300ms"), 300);
+      setTimeout(() => sendSnapshot("t+1200ms"), 1200);
     });
-  }, [currentStepIndex, activeTab, breakpointPcsMap]);
+  }, [sessionIdRef, allStepsRef]);
+
+  if (isCfgMode) {
+    const cfgFramesArr = [...cfgFrames.values()].map((f) => ({
+      key: makeCfgFrameKey(f.transactionId, f.contextId),
+      count: f.count,
+    }));
+    return <CfgWindow sessionId={cfgSessionId} frames={cfgFramesArr} />;
+  }
+
+  useActiveFrameProjection({
+    callFramesRef,
+    activeTab,
+    currentStepIndex,
+    breakpointPcsMap,
+  });
 
   return (
+    <FloatingPanelProvider>
     <div className="h-screen flex flex-col bg-background overflow-hidden">
       {/* 标签栏 */}
       <TabBar
@@ -337,30 +572,23 @@ function App() {
 
       {/* 主内容 */}
       <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-        {/* MainInterface 始终挂载，避免切换 frame 时 state 丢失 */}
-        <div className={activeTab === "main" ? "flex-1 flex flex-col min-h-0 overflow-hidden" : "hidden"}>
+        {/* 非 whatif 模式展示 main 界面 */}
+        <div className={!isWhatIfMode && activeTab === "main" ? "flex-1 flex flex-col min-h-0 overflow-hidden" : "hidden"}>
           <MainInterface
-            onTxChange={setTx}
-            onFetchTx={fetchTxAction}
             onStartDebug={startDebug}
             onReset={resetAll}
             onOpenTestDialog={() => storeSync({ isTestDialogOpen: true })}
-            onTxFieldChange={(field, value) => {
-              if (txData) {
-                setTxData({ ...txData, [field]: value });
-              }
-            }}
-            onBlockFieldChange={(field, value) => {
-              if (blockData) {
-                setBlockData({ ...blockData, [field]: value });
-              }
-            }}
             onBuildCallTree={() => setCallTreeNodes([...callTreeRef.current])}
             onSeekTo={seekToWithHistory}
             onSelectFrame={handleSelectFrame}
             onNavigateTo={navigateTo}
           />
         </div>
+        {isWhatIfMode && activeTab === "main" ? (
+          <div className="flex-1 flex items-center justify-center text-sm text-muted-foreground">
+            {whatIfInitStatus}
+          </div>
+        ) : null}
         {activeTab !== "main" && activeFrame ? (
           <>
             {/* 始终显示调试工具栏 */}
@@ -379,53 +607,74 @@ function App() {
               onNavForward={navForward}
               onSelectFrame={handleSelectFrame}
               onNavigateTo={navigateTo}
-              onRunConditionScan={runConditionScan}
               onStartDebug={startDebug}
+              onOpenCfgWindow={handleOpenCfgWindow}
             />
 
             {/* Area below toolbar — drawers are anchored here */}
             <div className="flex-1 relative min-h-0 overflow-hidden">
               <div className="h-full p-2 overflow-hidden">
                 <DebugPanel
-                callFrames={callFrames.map(f => ({
-                  contextId: f.contextId,
-                  depth: f.depth,
-                  address: f.address,
-                  caller: f.caller,
-                  target: f.target,
-                  contract: f.contract,
-                  gasLimit: f.gasLimit,
-                  gasUsed: f.gasUsed,
-                  value: f.value,
-                  input: f.input,
-                  callType: f.callType,
-                  parentId: f.parentId,
-                  startStep: stepIndexByContextRef.current.get(f.contextId)?.[0],
-                  endStep: (() => { const arr = stepIndexByContextRef.current.get(f.contextId); return arr?.[arr.length - 1]; })(),
-                  exitCode: f.exitCode,
-                  success: f.success,
-                  exitOutput: f.exitOutput,
-                }))}
-                activeFrameId={activeTab}
-                onSelectFrame={handleSelectFrame}
-                onBack={handleGoBack}
-                canGoBack={tabHistory.length > 0}
-                onToggleBreakpoint={(pc) => handleToggleBreakpoint(activeTab, pc)}
-                scanUrl={scanUrl}
-                onSeekTo={seekToWithHistory}
+                  callFrames={callFrames.map(f => ({
+                    id: f.id,
+                    transactionId: f.transactionId,
+                    contextId: f.contextId,
+                    depth: f.depth,
+                    address: f.address,
+                    caller: f.caller,
+                    target: f.target,
+                    contract: f.contract,
+                    gasLimit: f.gasLimit,
+                    gasUsed: f.gasUsed,
+                    value: f.value,
+                    input: f.input,
+                    callType: f.callType,
+                    parentId: f.parentId,
+                    startStep: stepIndexByContextRef.current.get(
+                      `${f.transactionId ?? 0}:${f.contextId}`,
+                    )?.[0],
+                    endStep: (() => {
+                      const arr = stepIndexByContextRef.current.get(
+                        `${f.transactionId ?? 0}:${f.contextId}`,
+                      );
+                      return arr?.[arr.length - 1];
+                    })(),
+                    exitCode: f.exitCode,
+                    success: f.success,
+                    exitOutput: f.exitOutput,
+                  }))}
+                  activeFrameId={activeTab}
+                  onSelectFrame={handleSelectFrame}
+                  onBack={handleGoBack}
+                  canGoBack={tabHistory.length > 0}
+                  onToggleBreakpoint={(pc) => handleToggleBreakpoint(activeTab, pc)}
+                  scanUrl={scanUrl}
+                  onSeekTo={seekToWithHistory}
                 />
               </div>
               <BookmarksDrawer
                 onNavigate={(frameId, pc) => {
-                  const contextId = parseInt(frameId.replace("frame-", ""), 10);
-                  const stepIndex = allStepsRef.current.findIndex(
-                    (s) => s.contextId === contextId && s.pc === pc
-                  );
+                  const m = /^frame-(\d+)-(\d+)$/.exec(frameId);
+                  const stepIndex = m
+                    ? allStepsRef.current.findIndex(
+                        (s) =>
+                          s.transactionId === Number(m[1]) &&
+                          s.contextId === Number(m[2]) &&
+                          s.pc === pc,
+                      )
+                    : allStepsRef.current.findIndex(
+                        (s) =>
+                          s.contextId ===
+                            parseInt(frameId.replace("frame-", ""), 10) &&
+                          s.pc === pc,
+                      );
                   if (stepIndex >= 0) navigateTo(stepIndex, frameId);
                 }}
               />
-              <CondListDrawer
+              <CondScanDrawer
                 onRunConditionScan={runConditionScan}
+                onClearAllConditions={clearAllConditions}
+                onSeekTo={seekToWithHistory}
                 disabled={!useDebugStore.getState().stepCount}
               />
             </div>
@@ -433,11 +682,8 @@ function App() {
         ) : null}
       </div>
 
-      {/* 测试对话框 */}
-      <TestDialog />
-      <GlobalLogDrawer onSeekTo={seekToWithHistory} />
-      <UtilitiesDrawer />
-      <AnalysisDrawer />
+      {/* 全局 Drawer 挂载点 */}
+      <DrawerHost onSeekToWithHistory={seekToWithHistory} />
       <DataFlowDrawer
         isOpen={useDebugStore((s) => s.isDataFlowModalOpen)}
         onClose={useCallback(() => useDebugStore.getState().closeDataFlowModal(), [])}
@@ -452,6 +698,7 @@ function App() {
       {/* <NotesDrawer onSeekTo={seekToWithHistory} /> */}
       <Toaster />
     </div>
+    </FloatingPanelProvider>
   );
 }
 

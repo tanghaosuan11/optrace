@@ -257,15 +257,7 @@ export const DataFlowTreeComponent: React.FC<DataFlowTreeProps> = ({
 
   return (
     <div className="w-full h-full bg-white flex flex-col">
-      {/* 头部信息 - 紧凑 */}
-      <div className="px-2 py-1.5 border-b border-gray-200 bg-gray-50 flex-shrink-0">
-        <div className="flex items-baseline gap-2">
-          <h3 className="text-xs font-semibold text-gray-900">数据流树</h3>
-          <span className="text-[10px] text-gray-600">step #{nodeMap.get(root_id)?.global_step} | {nodes.length} nodes</span>
-        </div>
-      </div>
-
-      {/* 树形显示区域 - 水平滚动，紧凑间距 */}
+      {/* 树形显示区域 - 水平滚动，紧凑间距（元信息在 DataFlowModal 顶栏单行） */}
       <div ref={containerRef} className="flex-1 overflow-auto relative bg-gradient-to-br from-gray-50 to-white">
         {/* 内容层 - 紧凑布局 */}
         <div ref={contentRef} className="min-w-max p-2 relative" style={{ zIndex: 1 }}>

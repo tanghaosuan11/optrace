@@ -15,8 +15,6 @@ export interface ShortcutDef {
   when?: () => boolean;
 }
 
-// ── 条件谓词（复用） ──────────────────────────────────────────────────────────
-
 const isDebugging = () => useDebugStore.getState().stepCount > 0;
 
 // 后期添加新快捷键直接在此追加一行即可。
@@ -42,8 +40,6 @@ export const SHORTCUT_MAP: Record<string, ShortcutDef> = {
   // "ctrl+shift+b":     { commandId: "ui.toggleBookmarks", description: "Toggle Bookmarks" },
   // "L":     { commandId: "ui.toggleCondList",  description: "Toggle Condition List" },
 };
-
-// ── 工具函数 ──────────────────────────────────────────────────────────────────
 
 /** e.key → 规范名称映射（覆盖浏览器原始值） */
 const KEY_ALIASES: Record<string, string> = {

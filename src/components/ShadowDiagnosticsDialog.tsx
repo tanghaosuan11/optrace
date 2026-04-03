@@ -16,6 +16,7 @@ import {
   type ShadowValidationReport,
 } from "@/lib/shadowDiagnostics";
 import { toast } from "sonner";
+import { useDebugStore } from "@/store/debugStore";
 
 interface ShadowDiagnosticsDialogProps {
   open: boolean;
@@ -26,6 +27,7 @@ export function ShadowDiagnosticsDialog({
   open,
   onOpenChange,
 }: ShadowDiagnosticsDialogProps) {
+  const sessionId = useDebugStore((s) => s.sessionId);
   const [start, setStart] = useState("0");
   const [end, setEnd] = useState("100");
   const [loading, setLoading] = useState(false);
@@ -51,7 +53,7 @@ export function ShadowDiagnosticsDialog({
       
 
       // 再显示详细信息
-      await debugShadowSteps(startNum, endNum);
+      await debugShadowSteps(startNum, endNum, sessionId);
       
       console.log("\n✅ Shadow diagnostics completed. Check the console above.");
     } catch (error) {
@@ -66,7 +68,7 @@ export function ShadowDiagnosticsDialog({
       setLoading(true);
       toast.message("Export started. Large sessions may take some time.");
       console.log("📁 Exporting all shadow steps to file...");
-      const filePath = await exportAllShadowSteps();
+      const filePath = await exportAllShadowSteps(sessionId);
       toast.success(`Export completed: ${filePath}`);
       console.log(`✅ Export completed! File saved to: ${filePath}`);
     } catch (error) {
@@ -80,7 +82,7 @@ export function ShadowDiagnosticsDialog({
   const handleValidate = async () => {
     try {
       setLoading(true);
-      const result = await validateShadowSteps(300);
+      const result = await validateShadowSteps(300, sessionId);
       setReport(result);
       if (result.mismatch_count === 0) {
         toast.success(
@@ -145,11 +147,17 @@ export function ShadowDiagnosticsDialog({
                 {report.checked_slots.toLocaleString()} slots, mismatches:{" "}
                 {report.mismatch_count.toLocaleString()}
               </div>
-              {report.mismatches.slice(0, 20).map((m, idx) => (
-                <div key={`${m.step}-${m.stack_index}-${idx}`} className="font-mono text-[11px]">
-                  step {m.step} frame {m.frame_id ?? "-"} idx {m.stack_index} nid {m.shadow_id} {m.reason}
-                </div>
-              ))}
+              {report.mismatches.slice(0, 20).map((m, idx) => {
+                const scope =
+                  m.transaction_id != null
+                    ? `tx ${m.transaction_id + 1} frame ${m.frame_id ?? "-"}`
+                    : `frame ${m.frame_id ?? "-"}`;
+                return (
+                  <div key={`${m.step}-${m.stack_index}-${idx}`} className="font-mono text-[11px]">
+                    step {m.step} {scope} idx {m.stack_index} nid {m.shadow_id} {m.reason}
+                  </div>
+                );
+              })}
             </div>
           )}
         </div>

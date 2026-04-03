@@ -1,4 +1,6 @@
-import { parseStepBatch, type StepData } from "./stepPlayer";
+import type { ParsedStepBatchResult, StepData, StepStackEntry } from "./stepPlayer";
+import { unpackCompactToSteps } from "./stepPlayer";
+import { frameScopeKey, frameScopeKeyFromFrame, frameScopeKeyFromStep } from "./frameScope";
 import { disassemble, type Opcode } from "./opcodes";
 import { useDebugStore } from "@/store/debugStore";
 import { toast } from "sonner";
@@ -9,29 +11,63 @@ import {
     type MemorySnapshot,
     type ReturnDataEntry,
     type StorageChangeEntry,
+    type AddressBalance,
     type CallFrame,
     type CallTreeNode,
     type MessageHandlerContext,
+    type MessageRuntimeState,
 } from "./types";
 
 // Re-export types for backward compatibility
 export { MsgType, InstructionResult } from "./types";
 export type { LogEntry, MemoryPatch, MemorySnapshot, ReturnDataEntry, StorageChangeEntry, CallFrame, CallTreeNode, CallTreeNodeType, MessageHandlerContext } from "./types";
 
-// 缓存收到的 FrameEnter，等 ContractSource 到来时填充到 CallFrame
-const pendingFrameEnters = new Map<number, Record<string, unknown>>();
+/** 流式阶段减少 Zustand 与 CFG emit 频率（仍会在首步与 finalize 刷新）。 */
+const STEP_COUNT_STORE_INTERVAL = 15_000;
 
-// contextId → CallFrame 快速查找表，替代 O(n) 的 .find()
-const _frameByCtx = new Map<number, CallFrame>();
+export function createMessageRuntimeState(): MessageRuntimeState {
+    return {
+        pendingFrameEnters: new Map<string, Record<string, unknown>>(),
+        frameByCtx: new Map<string, CallFrame>(),
+        firstStepIndexByScope: new Map<string, number>(),
+        disasmCache: new Map<string, Opcode[]>(),
+        callFramesFlushTimer: null,
+        debugStartPerfMs: null,
+        finishedPerfLogged: false,
+        perfStreamLastLogMs: 0,
+        perfStepBatchCount: 0,
+        perfStepParseMs: 0,
+        perfStepIndexMs: 0,
+        perfContractSourceCount: 0,
+        perfContractDisasmMs: 0,
+        perfContractHexMs: 0,
+        stepBatchWorker: null,
+        stepBatchRequestSeq: 0,
+        stepBatchNextResultSeq: 0,
+        stepBatchPendingCount: 0,
+        stepBatchPendingResults: new Map(),
+        finishedDeferred: false,
+        startDebugInFlight: false,
+    };
+}
 
-// bytecode hash → 反汇编结果缓存，避免同一合约重复 disassemble
-const _disasmCache = new Map<string, Opcode[]>();
-let _debugStartPerfMs: number | null = null;
-let _finishedPerfLogged = false;
-
-export function markDebugPerfStart() {
-    _debugStartPerfMs = performance.now();
-    _finishedPerfLogged = false;
+export function markDebugPerfStart(runtime: MessageRuntimeState) {
+    const now = performance.now();
+    runtime.debugStartPerfMs = now;
+    runtime.finishedPerfLogged = false;
+    runtime.perfStreamLastLogMs = now;
+    runtime.perfStepBatchCount = 0;
+    runtime.perfStepParseMs = 0;
+    runtime.perfStepIndexMs = 0;
+    runtime.perfContractSourceCount = 0;
+    runtime.perfContractDisasmMs = 0;
+    runtime.perfContractHexMs = 0;
+    runtime.stepBatchRequestSeq = 0;
+    runtime.stepBatchNextResultSeq = 0;
+    runtime.stepBatchPendingCount = 0;
+    runtime.stepBatchPendingResults.clear();
+    runtime.finishedDeferred = false;
+    runtime.startDebugInFlight = false;
 }
 
 function _hashBytecode(bytes: Uint8Array): string {
@@ -44,23 +80,190 @@ function _hashBytecode(bytes: Uint8Array): string {
     return `${bytes.length}:${(h >>> 0).toString(36)}`;
 }
 
-export function resetPendingFrameEnters() {
-    pendingFrameEnters.clear();
-    _frameByCtx.clear();
-    _disasmCache.clear();
-    _debugStartPerfMs = null;
-    _finishedPerfLogged = false;
+const HEX_TABLE = Array.from({ length: 256 }, (_, i) => i.toString(16).padStart(2, "0"));
+
+function fastHex(bytes: Uint8Array): string {
+    let out = "0x";
+    for (let i = 0; i < bytes.length; i++) out += HEX_TABLE[bytes[i]];
+    return out;
 }
 
-// ─── 节流：setCallFrames 最多每 200ms 触发一次 ─────────────────────────────────
-let _callFramesFlushTimer: ReturnType<typeof setTimeout> | null = null;
+function maybeLogStreamPerf(context: MessageHandlerContext) {
+    if (context.runtime.debugStartPerfMs === null || context.runtime.finishedPerfLogged) return;
+    const now = performance.now();
+    if (now - context.runtime.perfStreamLastLogMs < 2000) return;
+    context.runtime.perfStreamLastLogMs = now;
+    const totalMs = now - context.runtime.debugStartPerfMs;
+    const totalSteps = context.allStepsRef.current.length;
+    console.log(
+        `[perf.frontend.stream] ${totalMs.toFixed(0)}ms steps=${totalSteps.toLocaleString()} batches=${context.runtime.perfStepBatchCount} parse=${context.runtime.perfStepParseMs.toFixed(1)}ms index=${context.runtime.perfStepIndexMs.toFixed(1)}ms contract=${context.runtime.perfContractSourceCount} disasm=${context.runtime.perfContractDisasmMs.toFixed(1)}ms hex=${context.runtime.perfContractHexMs.toFixed(1)}ms`
+    );
+}
+
+export function resetPendingFrameEnters(runtime: MessageRuntimeState) {
+    runtime.pendingFrameEnters.clear();
+    runtime.frameByCtx.clear();
+    runtime.firstStepIndexByScope.clear();
+    runtime.disasmCache.clear();
+    runtime.debugStartPerfMs = null;
+    runtime.finishedPerfLogged = false;
+    runtime.perfStreamLastLogMs = 0;
+    runtime.perfStepBatchCount = 0;
+    runtime.perfStepParseMs = 0;
+    runtime.perfStepIndexMs = 0;
+    runtime.perfContractSourceCount = 0;
+    runtime.perfContractDisasmMs = 0;
+    runtime.perfContractHexMs = 0;
+    runtime.stepBatchRequestSeq = 0;
+    runtime.stepBatchNextResultSeq = 0;
+    runtime.stepBatchPendingCount = 0;
+    runtime.stepBatchPendingResults.clear();
+    runtime.finishedDeferred = false;
+    runtime.startDebugInFlight = false;
+}
+
+function finalizeFinished(context: MessageHandlerContext) {
+    // 清除节流定时器，强制最终刷新
+    if (context.runtime.callFramesFlushTimer !== null) {
+        clearTimeout(context.runtime.callFramesFlushTimer);
+        context.runtime.callFramesFlushTimer = null;
+    }
+    context.callTreeRef.current = buildCallTree(
+        context.allStepsRef.current,
+        context.callFramesRef.current
+    );
+    // 一次性计算 executedOpcodeSet，避免流式阶段反复创建 Set
+    const executedOpcodeSet = new Set(context.opcodeIndex.current.keys());
+    useDebugStore.getState().sync({
+        callTreeNodes: [...context.callTreeRef.current],
+        executedOpcodeSet,
+    });
+    // 强制同步最终状态到 React
+    context.setCallFrames([...context.callFramesRef.current]);
+    const totalSteps = context.allStepsRef.current.length;
+    context.setStepCount(totalSteps);
+    context.setIsDebugging(false);
+    if (context.runtime.debugStartPerfMs !== null && !context.runtime.finishedPerfLogged) {
+        const elapsedMs = performance.now() - context.runtime.debugStartPerfMs;
+        console.log(
+            `[perf.frontend] startDebug -> Finished in ${elapsedMs.toFixed(1)}ms (${totalSteps.toLocaleString()} steps)`
+        );
+        context.runtime.finishedPerfLogged = true;
+    }
+    toast.success(`Ready — ${totalSteps.toLocaleString()} steps`, { id: "debug-finished" });
+    useDebugStore.getState().sync({ traceFinished: true });
+}
+
+function applyParsedStepBatch(parsed: ParsedStepBatchResult, context: MessageHandlerContext) {
+    context.runtime.perfStepParseMs += parsed.parseMs;
+    context.runtime.perfStepIndexMs += parsed.indexBuildMs;
+    context.runtime.perfStepBatchCount += 1;
+
+    const arr = context.allStepsRef.current;
+    const add = parsed.steps;
+    const prevCount = arr.length;
+    // 预分配 + 直接索引赋值，避免 spread 展开大数组时的参数栈开销
+    arr.length = prevCount + add.length;
+    for (let i = 0; i < add.length; i++) arr[prevCount + i] = add[i];
+    const newCount = arr.length;
+
+    const applyIndexStartMs = performance.now();
+    const stepIdx = context.stepIndexByContext.current;
+    const opcodeIdx = context.opcodeIndex.current;
+    for (const [scopeKey, localIndexes] of parsed.contextLocalIndexes) {
+        let arr = stepIdx.get(scopeKey);
+        if (!arr) {
+            arr = [];
+            stepIdx.set(scopeKey, arr);
+        }
+        for (let i = 0; i < localIndexes.length; i++) arr.push(prevCount + localIndexes[i]);
+        if (!context.runtime.firstStepIndexByScope.has(scopeKey) && localIndexes.length > 0) {
+            let minL = localIndexes[0]!;
+            for (let i = 1; i < localIndexes.length; i++) {
+                if (localIndexes[i]! < minL) minL = localIndexes[i]!;
+            }
+            context.runtime.firstStepIndexByScope.set(scopeKey, prevCount + minL);
+        }
+    }
+    for (const [opcode, localIndexes] of parsed.opcodeLocalIndexes) {
+        let arr = opcodeIdx.get(opcode);
+        if (!arr) {
+            arr = [];
+            opcodeIdx.set(opcode, arr);
+        }
+        for (let i = 0; i < localIndexes.length; i++) arr.push(prevCount + localIndexes[i]);
+    }
+    context.runtime.perfStepIndexMs += performance.now() - applyIndexStartMs;
+
+    if (
+        prevCount === 0 ||
+        Math.floor(prevCount / STEP_COUNT_STORE_INTERVAL) !==
+            Math.floor(newCount / STEP_COUNT_STORE_INTERVAL)
+    ) {
+        context.setStepCount(newCount);
+    }
+
+    if (prevCount === 0 && parsed.steps.length > 0) {
+        const firstStep = parsed.steps[0];
+        if (context.runtime.frameByCtx.has(frameScopeKeyFromStep(firstStep))) {
+            context.applyStep(0);
+        }
+    }
+    maybeLogStreamPerf(context);
+}
+
+function drainParsedStepBatches(context: MessageHandlerContext) {
+    while (true) {
+        const parsed = context.runtime.stepBatchPendingResults.get(context.runtime.stepBatchNextResultSeq);
+        if (!parsed) break;
+        context.runtime.stepBatchPendingResults.delete(context.runtime.stepBatchNextResultSeq);
+        context.runtime.stepBatchNextResultSeq += 1;
+        applyParsedStepBatch(parsed, context);
+    }
+    if (context.runtime.finishedDeferred && context.runtime.stepBatchPendingCount === 0) {
+        context.runtime.finishedDeferred = false;
+        finalizeFinished(context);
+    }
+}
+
+function ensureStepBatchWorker(context: MessageHandlerContext): Worker {
+    if (context.runtime.stepBatchWorker) return context.runtime.stepBatchWorker;
+
+    const worker = new Worker(new URL("./stepBatchWorker.ts", import.meta.url), { type: "module" });
+    worker.onmessage = (event: MessageEvent<{
+        kind: "parsed"; seq: number;
+        compact: Float64Array; stackEntries: StepStackEntry[];
+        contextLocalIndexes: Array<[string, number[]]>;
+        opcodeLocalIndexes: Array<[number, number[]]>;
+        parseMs: number; indexBuildMs: number;
+    }>) => {
+        const msg = event.data;
+        if (!msg || msg.kind !== "parsed") return;
+        // compact 经 transferList 零复制到达，拆包为 StepData[] 只是紧凑循环，无结构化克隆开销
+        const steps = unpackCompactToSteps(msg.compact, msg.stackEntries);
+        context.runtime.stepBatchPendingCount = Math.max(0, context.runtime.stepBatchPendingCount - 1);
+        context.runtime.stepBatchPendingResults.set(msg.seq, {
+            steps,
+            contextLocalIndexes: msg.contextLocalIndexes,
+            opcodeLocalIndexes: msg.opcodeLocalIndexes,
+            parseMs: msg.parseMs,
+            indexBuildMs: msg.indexBuildMs,
+        });
+        drainParsedStepBatches(context);
+    };
+    worker.onerror = (err) => {
+        console.error("[step-batch-worker] parse failed", err);
+    };
+    context.runtime.stepBatchWorker = worker;
+    return worker;
+}
 
 function scheduleCallFramesFlush(context: MessageHandlerContext) {
-    if (_callFramesFlushTimer !== null) return;
-    _callFramesFlushTimer = setTimeout(() => {
-        _callFramesFlushTimer = null;
+    if (context.runtime.callFramesFlushTimer !== null) return;
+    context.runtime.callFramesFlushTimer = setTimeout(() => {
+        context.runtime.callFramesFlushTimer = null;
         context.setCallFrames([...context.callFramesRef.current]);
-    }, 200);
+    }, 350);
 }
 
 /**
@@ -70,40 +273,11 @@ export function handleStepBatch(
     body: Uint8Array,
     context: MessageHandlerContext
 ) {
-    // console.log(`[StepBatch] 收到消息，body长度: ${body.length}`);
-    const steps = parseStepBatch(body);
-    // console.log(`[StepBatch] 解析完成，得到 ${steps.length} 步`);
-
-    const prevCount = context.allStepsRef.current.length;
-    // 直接修改数组，避免创建新数组和复制开销
-    context.allStepsRef.current.push(...steps);
-    const newCount = context.allStepsRef.current.length;
-
-    // 同步更新 per-context 步骤索引 + opcode 索引（O(batch) 追加，无额外遍历）
-    const stepIdx = context.stepIndexByContext.current;
-    const opcodeIdx = context.opcodeIndex.current;
-    for (let i = prevCount; i < newCount; i++) {
-        const step = context.allStepsRef.current[i];
-        let arr = stepIdx.get(step.contextId);
-        if (!arr) { arr = []; stepIdx.set(step.contextId, arr); }
-        arr.push(i);
-        let oarr = opcodeIdx.get(step.opcode);
-        if (!oarr) { oarr = []; opcodeIdx.set(step.opcode, oarr); }
-        oarr.push(i);
-    }
-
-    // 每跨越 5000 步边界才更新 stepCount，减少 React 重渲染（最终精确值由 Finished 补齐）
-    if (Math.floor(prevCount / 5000) !== Math.floor(newCount / 5000) || prevCount === 0) {
-        context.setStepCount(newCount);
-    }
-
-    // 第一批数据时，检查是否可以应用第一步
-    if (prevCount === 0 && steps.length > 0) {
-        const firstStep = steps[0];
-        if (_frameByCtx.has(firstStep.contextId)) {
-            context.applyStep(0);
-        }
-    }
+    const worker = ensureStepBatchWorker(context);
+    const seq = context.runtime.stepBatchRequestSeq++;
+    context.runtime.stepBatchPendingCount += 1;
+    const transferBody = body.slice();
+    worker.postMessage({ kind: "parse", seq, body: transferBody }, [transferBody.buffer]);
 }
 
 /**
@@ -116,38 +290,46 @@ export function handleContractSource(
     const dv = new DataView(body.buffer, body.byteOffset, body.byteLength);
 
     const depth = dv.getUint16(0, false);
-    const contextId = dv.getUint16(2, false);
-    const bytecodeLen = dv.getUint32(4, false);
-    const bytecode = body.slice(8, 8 + bytecodeLen);
+    let transactionId = 0;
+    let contextId: number;
+    let bytecodeLen: number;
+    let bytecode: Uint8Array;
+    if (body.byteLength >= 12) {
+        transactionId = dv.getUint32(2, false);
+        contextId = dv.getUint16(6, false);
+        bytecodeLen = dv.getUint32(8, false);
+        bytecode = body.slice(12, 12 + bytecodeLen);
+    } else {
+        contextId = dv.getUint16(2, false);
+        bytecodeLen = dv.getUint32(4, false);
+        bytecode = body.slice(8, 8 + bytecodeLen);
+    }
+    const scope = frameScopeKey(transactionId, contextId);
 
     // console.log(
     //     `收到 contract bytecode: depth=${depth}, contextId=${contextId}, bytecode长度=${bytecode.length}`
     // );
 
 
+    context.runtime.perfContractSourceCount += 1;
     const bcKey = _hashBytecode(bytecode);
-    let opcodes = _disasmCache.get(bcKey);
+    let opcodes = context.runtime.disasmCache.get(bcKey);
     if (!opcodes) {
-        opcodes = disassemble(bytecode).map((instr) => ({
-            pc: instr.pc,
-            name: instr.name,
-            data: instr.data,
-            gas: undefined,
-            category: instr.category,
-            warning: instr.warning,
-            isMetadata: instr.isMetadata,
-        }));
-        _disasmCache.set(bcKey, opcodes);
+        const disasmStartMs = performance.now();
+        opcodes = disassemble(bytecode);
+        context.runtime.perfContractDisasmMs += performance.now() - disasmStartMs;
+        context.runtime.disasmCache.set(bcKey, opcodes);
     }
 
-    // 将 bytecode 转换为 hex 字符串
-    const bytecodeHex = '0x' + Array.from(bytecode)
-        .map(b => b.toString(16).padStart(2, '0'))
-        .join('');
+    // 使用紧凑循环替代 Array.from/map/join，降低大字节码的字符串化开销
+    const hexStartMs = performance.now();
+    const bytecodeHex = fastHex(bytecode);
+    context.runtime.perfContractHexMs += performance.now() - hexStartMs;
 
     const newFrame: CallFrame = {
-        id: `frame-${contextId}`,
+        id: `frame-${transactionId}-${contextId}`,
         contextId: contextId,
+        transactionId,
         depth: depth,
         address: '',
         bytecode: bytecodeHex,
@@ -163,7 +345,7 @@ export function handleContractSource(
     };
 
     // 取之前缓存的 FrameEnter 填充 caller / target / contract / gasLimit / value
-    const pending = pendingFrameEnters.get(contextId);
+    const pending = context.runtime.pendingFrameEnters.get(scope);
     if (pending) {
         newFrame.caller   = pending.caller as string;
         newFrame.target   = pending.target_address as string;
@@ -174,30 +356,33 @@ export function handleContractSource(
         newFrame.gasUsed  = 0;
         newFrame.callType = (pending.kind as string)?.toLowerCase() as CallFrame["callType"];
         newFrame.parentId = pending.parent_id as number;
-        pendingFrameEnters.delete(contextId);
+        context.runtime.pendingFrameEnters.delete(scope);
     }
 
     context.callFramesRef.current.push(newFrame);
-    _frameByCtx.set(contextId, newFrame);
+    context.runtime.frameByCtx.set(scope, newFrame);
     scheduleCallFramesFlush(context);
 
-    // 如果还没有开始播放，检查是否可以应用某一步
+    // 如果还没有开始播放，检查是否可以应用某一步（用增量 firstStepIndexByScope，避免对整段 trace findIndex）
     if (
         context.currentStepIndexRef.current === -1 &&
         context.allStepsRef.current.length > 0
     ) {
-        const firstValidIndex = context.allStepsRef.current.findIndex(step =>
-            _frameByCtx.has(step.contextId)
-        );
-        if (firstValidIndex >= 0) {
-            const step = context.allStepsRef.current[firstValidIndex];
-            const frame = _frameByCtx.get(step.contextId)!;
+        let best = -1;
+        for (const scope of context.runtime.frameByCtx.keys()) {
+            const idx = context.runtime.firstStepIndexByScope.get(scope);
+            if (idx !== undefined && (best < 0 || idx < best)) best = idx;
+        }
+        if (best >= 0 && best < context.allStepsRef.current.length) {
+            const step = context.allStepsRef.current[best]!;
+            const frame = context.runtime.frameByCtx.get(frameScopeKeyFromStep(step))!;
             context.setActiveTab(frame.id);
-            context.applyStep(firstValidIndex);
+            context.applyStep(best);
         } else {
             context.setActiveTab(newFrame.id);
         }
     }
+    maybeLogStreamPerf(context);
 }
 
 /**
@@ -209,13 +394,20 @@ export function handleContextUpdateAddress(
 ) {
     const dv = new DataView(body.buffer, body.byteOffset, body.byteLength);
 
-    const contextId = dv.getUint16(0, false);
-    const addressBytes = body.slice(2, 22);
-    const address = '0x' + Array.from(addressBytes)
-        .map(b => b.toString(16).padStart(2, '0'))
-        .join('');
+    let transactionId = 0;
+    let contextId: number;
+    let addressBytes: Uint8Array;
+    if (body.byteLength >= 26) {
+        transactionId = dv.getUint32(0, false);
+        contextId = dv.getUint16(4, false);
+        addressBytes = body.slice(6, 26);
+    } else {
+        contextId = dv.getUint16(0, false);
+        addressBytes = body.slice(2, 22);
+    }
+    const address = fastHex(addressBytes);
 
-    const frame = _frameByCtx.get(contextId);
+    const frame = context.runtime.frameByCtx.get(frameScopeKey(transactionId, contextId));
     if (frame) {
         frame.address = address;
         scheduleCallFramesFlush(context);
@@ -233,7 +425,11 @@ export function handleLogs(
 
     const contextId = dv.getUint16(0, false);
     const stepCount = Number(dv.getBigUint64(2, false));
-    const jsonData = new TextDecoder().decode(body.slice(10));
+    /** 旧包体无 transaction_id，JSON 自 offset 10 起；新包体在 10–14 为 u32 BE */
+    const hasTransactionId = body.byteLength >= 15;
+    const transactionId = hasTransactionId ? dv.getUint32(10, false) : undefined;
+    const jsonOffset = hasTransactionId ? 14 : 10;
+    const jsonData = new TextDecoder().decode(body.slice(jsonOffset));
 
     try {
         const logData = JSON.parse(jsonData);
@@ -243,9 +439,11 @@ export function handleLogs(
             data: logData.data || '0x',
             stepIndex: stepCount,
             contextId: contextId,
+            ...(transactionId !== undefined ? { transactionId } : {}),
         };
 
-        const frame = _frameByCtx.get(contextId);
+        const tid = transactionId ?? 0;
+        const frame = context.runtime.frameByCtx.get(frameScopeKey(tid, contextId));
         if (frame) {
             frame.logs.push(logEntry);
             scheduleCallFramesFlush(context);
@@ -260,24 +458,30 @@ export function handleLogs(
  */
 export function handleMemoryUpdate(
     body: Uint8Array,
-    // context: MessageHandlerContext
+    context: MessageHandlerContext
 ) {
     // return;
     const dv = new DataView(body.buffer, body.byteOffset, body.byteLength);
 
-    const contextId = dv.getUint16(0, false);
-    const frameStepCount = Number(dv.getBigUint64(2, false));
-    const dstOffset = dv.getUint32(10, false);
-    const memoryData = body.slice(14);
-
-    // console.log(
-    //     `收到 memory update: contextId=${contextId}, frameStepCount=${frameStepCount}, dstOffset=${dstOffset}, dataLen=${memoryData.length}`
-    // );
-
-    // if (contextId === 76) {
-    //     const hex = '0x' + Array.from(memoryData).map(b => b.toString(16).padStart(2, '0')).join('');
-    //     console.log(`[ctx76] MemoryUpdate frameStep=${frameStepCount} dstOffset=${dstOffset} len=${memoryData.length} data=${hex}`);
-    // }
+    let transactionId = 0;
+    let contextId: number;
+    let frameStepCount: number;
+    let dstOffset: number;
+    let memoryData: Uint8Array;
+    // 新: transaction_id(4) + context_id(2) + step_count(8) + dst_offset(4) + data
+    // 旧: context_id(2) + step_count(8) + dst_offset(4) + data
+    if (body.byteLength >= 18) {
+        transactionId = dv.getUint32(0, false);
+        contextId = dv.getUint16(4, false);
+        frameStepCount = Number(dv.getBigUint64(6, false));
+        dstOffset = dv.getUint32(14, false);
+        memoryData = body.slice(18);
+    } else {
+        contextId = dv.getUint16(0, false);
+        frameStepCount = Number(dv.getBigUint64(2, false));
+        dstOffset = dv.getUint32(10, false);
+        memoryData = body.slice(14);
+    }
 
     // 直接 push 到 ref，立即可见，不走 React 异步队列
     const patch: MemoryPatch = {
@@ -286,7 +490,7 @@ export function handleMemoryUpdate(
         data: new Uint8Array(memoryData),  // 复制一份，避免引用问题
     };
 
-    const frame = _frameByCtx.get(contextId);
+    const frame = context.runtime.frameByCtx.get(frameScopeKey(transactionId, contextId));
     if (frame) {
         frame.memoryPatches.push(patch);
     }
@@ -294,7 +498,8 @@ export function handleMemoryUpdate(
 
 /**
  * 处理 ReturnData 消息 - 存储 frame 的返回数据
- * 格式: context_id(2) + step_count(8) + return_data(剩余字节)
+ * 旧: context_id(2) + step_count(8) + data
+ * 新: transaction_id(4) + context_id(2) + step_count(8) + data
  */
 export function handleReturnData(
     body: Uint8Array,
@@ -302,35 +507,48 @@ export function handleReturnData(
 ) {
     const dv = new DataView(body.buffer, body.byteOffset, body.byteLength);
 
-    const contextId = dv.getUint16(0, false);
-    const stepIndex = Number(dv.getBigUint64(2, false));
-    const returnData = body.slice(10);
+    let transactionId = 0;
+    let contextId: number;
+    let stepIndex: number;
+    let returnData: Uint8Array;
+    if (body.byteLength >= 14) {
+        transactionId = dv.getUint32(0, false);
+        contextId = dv.getUint16(4, false);
+        stepIndex = Number(dv.getBigUint64(6, false));
+        returnData = body.slice(14);
+    } else {
+        contextId = dv.getUint16(0, false);
+        stepIndex = Number(dv.getBigUint64(2, false));
+        returnData = body.slice(10);
+    }
 
     // 转换为 hex string
-    const dataHex = '0x' + Array.from(returnData)
-        .map(b => b.toString(16).padStart(2, '0'))
-        .join('');
+    const dataHex = fastHex(returnData);
 
     const entry: ReturnDataEntry = {
         stepIndex,
         contextId,
         data: dataHex,
+        ...(transactionId !== 0 ? { transactionId } : {}),
     };
 
-    const frame = _frameByCtx.get(contextId);
+    const frame = context.runtime.frameByCtx.get(frameScopeKey(transactionId, contextId));
     if (frame) {
         frame.returnDataList.push(entry);
         scheduleCallFramesFlush(context);
     }
 }
 
+/** StorageChange body 不含 type 字节；旧版 128 字节，新版在 step_index 后多 4 字节 transaction_id */
+const STORAGE_CHANGE_BODY_LEGACY = 128;
+
 /**
  * 处理 StorageChange 消息
- * 格式: storage_type(1) + is_read(1) + context_id(2) + step_index(8) + address(20) + slot(32) + old_value(32) + new_value(32)
+ * 格式: storage_type(1) + is_read(1) + context_id(2) + step_index(8) [+ transaction_id(4)] + address(20) + slot(32) + old_value(32) + new_value(32)
  */
 export function handleStorageChange(
     body: Uint8Array,
-    // context: MessageHandlerContext
+    context: MessageHandlerContext
 ) {
 
     const dv = new DataView(body.buffer, body.byteOffset, body.byteLength);
@@ -338,25 +556,36 @@ export function handleStorageChange(
     const isRead = body[1] === 1;
     const contextId = dv.getUint16(2, false);
     const stepIndex = Number(dv.getBigUint64(4, false));
-    const toHex = (slice: Uint8Array) =>
-        '0x' + Array.from(slice).map(b => b.toString(16).padStart(2, '0')).join('');
-    const address = toHex(body.slice(12, 32));
-    const key     = toHex(body.slice(32, 64));
-    const hadValue = toHex(body.slice(64, 96));
-    const newValue = toHex(body.slice(96, 128));
+    const hasTransactionId = body.byteLength >= STORAGE_CHANGE_BODY_LEGACY + 4;
+    const transactionId = hasTransactionId ? dv.getUint32(12, false) : undefined;
+    const addrStart = hasTransactionId ? 16 : 12;
+    const toHex = (slice: Uint8Array) => fastHex(slice);
+    const address = toHex(body.slice(addrStart, addrStart + 20));
+    const key     = toHex(body.slice(addrStart + 20, addrStart + 52));
+    const hadValue = toHex(body.slice(addrStart + 52, addrStart + 84));
+    const newValue = toHex(body.slice(addrStart + 84, addrStart + 116));
 
-    const entry: StorageChangeEntry = {isRead, storageType, stepIndex, contextId, address, key, hadValue, newValue };
+    const entry: StorageChangeEntry = {
+        isRead,
+        storageType,
+        stepIndex,
+        contextId,
+        address,
+        key,
+        hadValue,
+        newValue,
+        ...(transactionId !== undefined ? { transactionId } : {}),
+    };
 
-    const frame = _frameByCtx.get(contextId);
+    const tid = transactionId ?? 0;
+    const frame = context.runtime.frameByCtx.get(frameScopeKey(tid, contextId));
     if (frame) {
         frame.storageChanges.push(entry);
         // 不触发 React 重渲染，播放时前端会直接读 ref
     }
 }
 
-// ─────────────────────────────────────────────
-// computeMemoryAtStep 专用查找表
-// ─────────────────────────────────────────────
+// computeMemoryAtStep: hex tables
 const _MEM_HEX = (() => {
     const t = new Array<string>(256);
     for (let i = 0; i < 256; i++) t[i] = i.toString(16).padStart(2, '0');
@@ -457,7 +686,7 @@ export function handleMessage(
 
     const data = new Uint8Array(message);
     const msgType = data[0];
-    const body = data.slice(1);
+    const body = data.subarray(1);
 
     switch (msgType) {
         case MsgType.StepBatch:
@@ -485,21 +714,27 @@ export function handleMessage(
             break;
 
         case MsgType.StorageChange:
-            // handleStorageChange(body, context);
-            handleStorageChange(body);
+            handleStorageChange(body, context);
             break;
 
         case MsgType.FrameExit: {
-            // body = [frame_id:2] [result:1] [success:1] [gas_used:8] [output_len:4] [output:N]
+            // 旧: [frame_id:2] [result:1] [success:1] [gas_used:8] [output_len:4] [output:N]
+            // 新: [transaction_id:4] [frame_id:2] [result:1] [success:1] [gas_used:8] [output_len:4] [output:N]
             const exitDv = new DataView(body.buffer, body.byteOffset, body.byteLength);
-            const exitFrameId = exitDv.getUint16(0, false);
-            const exitResult = exitDv.getUint8(2);
-            const exitSuccess = exitDv.getUint8(3) === 1;
-            const exitGasUsed = Number(exitDv.getBigUint64(4, false));
-            const exitOutputLen = exitDv.getUint32(12, false);
-            const exitOutputBytes = body.slice(16, 16 + exitOutputLen);
-            const exitOutput = '0x' + Array.from(exitOutputBytes).map(b => b.toString(16).padStart(2, '0')).join('');
-            const exitFrame = _frameByCtx.get(exitFrameId);
+            let exitOff = 0;
+            let exitTransactionId = 0;
+            if (body.byteLength >= 20) {
+                exitTransactionId = exitDv.getUint32(0, false);
+                exitOff = 4;
+            }
+            const exitFrameId = exitDv.getUint16(exitOff, false);
+            const exitResult = exitDv.getUint8(exitOff + 2);
+            const exitSuccess = exitDv.getUint8(exitOff + 3) === 1;
+            const exitGasUsed = Number(exitDv.getBigUint64(exitOff + 4, false));
+            const exitOutputLen = exitDv.getUint32(exitOff + 12, false);
+            const exitOutputBytes = body.slice(exitOff + 16, exitOff + 16 + exitOutputLen);
+            const exitOutput = fastHex(exitOutputBytes);
+            const exitFrame = context.runtime.frameByCtx.get(frameScopeKey(exitTransactionId, exitFrameId));
             if (exitFrame) {
                 exitFrame.exitCode = exitResult;
                 exitFrame.success = exitSuccess;
@@ -511,14 +746,21 @@ export function handleMessage(
         }
 
         case MsgType.SelfDestruct: {
-            // body = [frame_id:2] [contract:20] [target:20] [value:32]
+            // 旧: [frame_id:2] [contract:20] [target:20] [value:32]
+            // 新: [transaction_id:4] [frame_id:2] [contract:20] [target:20] [value:32]
             const sdDv = new DataView(body.buffer, body.byteOffset, body.byteLength);
-            const sdFrameId = sdDv.getUint16(0, false);
-            const sdContract = '0x' + Array.from(body.slice(2, 22)).map(b => b.toString(16).padStart(2, '0')).join('');
-            const sdTarget = '0x' + Array.from(body.slice(22, 42)).map(b => b.toString(16).padStart(2, '0')).join('');
-            const sdValueBytes = body.slice(42, 74);
-            const sdValue = '0x' + Array.from(sdValueBytes).map(b => b.toString(16).padStart(2, '0')).join('');
-            const sdFrame = _frameByCtx.get(sdFrameId);
+            let sdOff = 0;
+            let sdTransactionId = 0;
+            if (body.byteLength >= 78) {
+                sdTransactionId = sdDv.getUint32(0, false);
+                sdOff = 4;
+            }
+            const sdFrameId = sdDv.getUint16(sdOff, false);
+            const sdContract = fastHex(body.slice(sdOff + 2, sdOff + 22));
+            const sdTarget = fastHex(body.slice(sdOff + 22, sdOff + 42));
+            const sdValueBytes = body.slice(sdOff + 42, sdOff + 74);
+            const sdValue = fastHex(sdValueBytes);
+            const sdFrame = context.runtime.frameByCtx.get(frameScopeKey(sdTransactionId, sdFrameId));
             if (sdFrame) {
                 sdFrame.selfdestructContract = sdContract;
                 sdFrame.selfdestructTarget = sdTarget;
@@ -529,15 +771,50 @@ export function handleMessage(
         }
 
         case MsgType.FrameEnter: {
-            const frameInfo = JSON.parse(new TextDecoder().decode(body));
-            pendingFrameEnters.set(frameInfo.frame_id as number, frameInfo);
+            const frameInfo = JSON.parse(new TextDecoder().decode(body)) as {
+                frame_id: number;
+                transaction_id?: number;
+            };
+            const tid = (frameInfo.transaction_id as number | undefined) ?? 0;
+            context.runtime.pendingFrameEnters.set(
+                frameScopeKey(tid, frameInfo.frame_id as number),
+                frameInfo,
+            );
             break;
         }
 
         case MsgType.BalanceChanges: {
             try {
-                const changes = JSON.parse(new TextDecoder().decode(body));
-                useDebugStore.getState().sync({ balanceChanges: changes });
+                const parsed = JSON.parse(new TextDecoder().decode(body));
+                if (Array.isArray(parsed) && parsed.length > 0) {
+                    const first = parsed[0] as Record<string, unknown>;
+                    // 多笔格式：[{ transaction_id, changes: AddressBalance[] }, ...]
+                    if ("transaction_id" in first && "changes" in first) {
+                        const merged: Array<Record<string, unknown>> = [];
+                        for (const group of parsed as Array<Record<string, unknown>>) {
+                            const tidRaw = group.transaction_id;
+                            const tid =
+                                typeof tidRaw === "number" && Number.isFinite(tidRaw) ? tidRaw : 0;
+                            const changes = Array.isArray(group.changes) ? group.changes : [];
+                            for (const c of changes) {
+                                if (c && typeof c === "object") {
+                                    merged.push({
+                                        ...(c as Record<string, unknown>),
+                                        transactionId: tid,
+                                    });
+                                }
+                            }
+                        }
+                        useDebugStore
+                            .getState()
+                            .sync({ balanceChanges: merged as unknown as AddressBalance[] });
+                    } else {
+                        // 单笔旧格式：AddressBalance[]
+                        useDebugStore.getState().sync({ balanceChanges: parsed });
+                    }
+                } else {
+                    useDebugStore.getState().sync({ balanceChanges: parsed });
+                }
             } catch (e) {
                 console.error('[BalanceChanges] parse failed', e);
             }
@@ -545,34 +822,28 @@ export function handleMessage(
         }
 
         case MsgType.Finished: {
-            // 清除节流定时器，强制最终刷新
-            if (_callFramesFlushTimer !== null) {
-                clearTimeout(_callFramesFlushTimer);
-                _callFramesFlushTimer = null;
+            if (body.length > 0) {
+                try {
+                    const meta = JSON.parse(new TextDecoder().decode(body)) as {
+                        txBoundaries?: unknown;
+                    };
+                    if (Array.isArray(meta.txBoundaries) && meta.txBoundaries.length > 0) {
+                        const nums = meta.txBoundaries.filter(
+                            (x): x is number => typeof x === "number" && Number.isFinite(x),
+                        );
+                        if (nums.length > 0) {
+                            useDebugStore.getState().sync({ txBoundaries: nums });
+                        }
+                    }
+                } catch (e) {
+                    console.warn("[Finished] optional meta parse failed", e);
+                }
             }
-            context.callTreeRef.current = buildCallTree(
-                context.allStepsRef.current,
-                context.callFramesRef.current
-            );
-            // 一次性计算 executedOpcodeSet，避免流式阶段反复创建 Set
-            const executedOpcodeSet = new Set(context.opcodeIndex.current.keys());
-            useDebugStore.getState().sync({
-                callTreeNodes: [...context.callTreeRef.current],
-                executedOpcodeSet,
-            });
-            // 强制同步最终状态到 React
-            context.setCallFrames([...context.callFramesRef.current]);
-            const totalSteps = context.allStepsRef.current.length;
-            context.setStepCount(totalSteps);
-            context.setIsDebugging(false);
-            if (_debugStartPerfMs !== null && !_finishedPerfLogged) {
-                const elapsedMs = performance.now() - _debugStartPerfMs;
-                console.log(
-                    `[perf.frontend] startDebug -> Finished in ${elapsedMs.toFixed(1)}ms (${totalSteps.toLocaleString()} steps)`
-                );
-                _finishedPerfLogged = true;
+            if (context.runtime.stepBatchPendingCount > 0) {
+                context.runtime.finishedDeferred = true;
+                break;
             }
-            toast.success(`Ready — ${totalSteps.toLocaleString()} steps`, { id: "debug-finished" });
+            finalizeFinished(context);
             break;
         }
 
@@ -585,62 +856,77 @@ export function handleMessage(
     }
 }
 
-// ─────────────────────────────────────────────
-// Call Tree
-// ─────────────────────────────────────────────
-
 /**
  * 在调试结束后一次性构建扁平 call tree 节点列表
  * O(n) 单次遍历
  */
 export function buildCallTree(steps: StepData[], frames: CallFrame[]): CallTreeNode[] {
     const nodes: CallTreeNode[] = [];
-    const seenContextIds = new Set<number>();
-    const frameMap = new Map(frames.map(f => [f.contextId, f]));
+    const seenScope = new Set<string>();
+    const frameMap = new Map(frames.map(f => [frameScopeKeyFromFrame(f), f]));
 
-    // 计算传递性回滚集合：自身失败 OR 任意祖先 frame 失败
-    // EVM 规则：父 call revert 时，所有子调用的状态变更一并回滚
-    const failedContextIds = new Set<number>(
-        frames.filter(f => f.success === false).map(f => f.contextId)
+    // 传递性回滚集合：按 transactionId 分组建 contextId→frame Map，O(1) 祖先查找
+    const frameMapByTid = new Map<number, Map<number, CallFrame>>();
+    for (const f of frames) {
+        const tid = f.transactionId ?? 0;
+        let m = frameMapByTid.get(tid);
+        if (!m) { m = new Map(); frameMapByTid.set(tid, m); }
+        m.set(f.contextId, f);
+    }
+    const failedScopes = new Set<string>(
+        frames.filter(f => f.success === false).map(f => frameScopeKeyFromFrame(f))
     );
-    const revertedContextIds = new Set<number>();
+    const revertedScopes = new Set<string>();
     for (const frame of frames) {
         let cur: CallFrame | undefined = frame;
+        const myScope = frameScopeKeyFromFrame(frame);
+        const tid = frame.transactionId ?? 0;
+        const tidMap = frameMapByTid.get(tid);
         while (cur) {
-            if (failedContextIds.has(cur.contextId)) {
-                revertedContextIds.add(frame.contextId);
+            if (failedScopes.has(frameScopeKeyFromFrame(cur))) {
+                revertedScopes.add(myScope);
                 break;
             }
-            cur = cur.parentId != null ? frameMap.get(cur.parentId) : undefined;
+            cur = cur.parentId != null ? tidMap?.get(cur.parentId) : undefined;
         }
     }
 
-    // Pre-build per-context log queues sorted by stepIndex for sequential consumption
-    const logQueueByContext = new Map<number, LogEntry[]>();
+    const logQueueByScope = new Map<string, LogEntry[]>();
     for (const frame of frames) {
-        logQueueByContext.set(frame.contextId, [...frame.logs].sort((a, b) => a.stepIndex - b.stepIndex));
+        const sk = frameScopeKeyFromFrame(frame);
+        logQueueByScope.set(sk, [...frame.logs].sort((a, b) => a.stepIndex - b.stepIndex));
     }
-    const logPtrByContext = new Map<number, number>();
+    const logPtrByScope = new Map<string, number>();
 
-    // Pre-build storageChange lookup: "contextId:stepIndex" → StorageChangeEntry
-    const storageChangeMap = new Map<string, StorageChangeEntry>();
+    // storageChangeMap: tid -> contextId -> stepIndex -> entry
+    // 数値复合 key，封闭主循环里每步的字符串模板分配
+    const storageChangeMap = new Map<number, Map<number, Map<number, StorageChangeEntry>>>();
     for (const frame of frames) {
+        const ftid = frame.transactionId ?? 0;
         for (const sc of frame.storageChanges) {
-            storageChangeMap.set(`${sc.contextId}:${sc.stepIndex}`, sc);
+            const stid = sc.transactionId ?? ftid;
+            let m1 = storageChangeMap.get(stid);
+            if (!m1) { m1 = new Map(); storageChangeMap.set(stid, m1); }
+            let m2 = m1.get(sc.contextId);
+            if (!m2) { m2 = new Map(); m1.set(sc.contextId, m2); }
+            m2.set(sc.stepIndex, sc);
         }
     }
 
     for (let i = 0; i < steps.length; i++) {
         const step = steps[i];
+        const sk = frameScopeKeyFromStep(step);
+        const stepTid = step.transactionId ?? 0;
 
-        // frame 节点：contextId 首次出现时插入
-        if (!seenContextIds.has(step.contextId)) {
-            seenContextIds.add(step.contextId);
-            const frame = frameMap.get(step.contextId);
+        // frame 节点：该 (transaction, context) 首次出现时插入
+        if (!seenScope.has(sk)) {
+            seenScope.add(sk);
+            const frame = frameMap.get(sk);
             nodes.push({
                 id: nodes.length,
                 type: 'frame',
                 stepIndex: i,
+                transactionId: stepTid,
                 contextId: step.contextId,
                 depth: step.depth,
                 callType: frame?.callType,
@@ -658,14 +944,17 @@ export function buildCallTree(steps: StepData[], frames: CallFrame[]): CallTreeN
         }
 
         const op = step.opcode;
+        // O(1) lookup with numeric keys — no string template allocation per step
+        const scForStep = storageChangeMap.get(stepTid)?.get(step.contextId)?.get(i + 1);
 
         // SLOAD (0x54): stack top = slot
         if (op === 0x54 && step.stackTop) {
-            const sc = storageChangeMap.get(`${step.contextId}:${i + 1}`);
+            const sc = scForStep;
             nodes.push({
                 id: nodes.length,
                 type: 'sload',
                 stepIndex: i,
+                transactionId: stepTid,
                 contextId: step.contextId,
                 depth: step.depth + 1,
                 slot: step.stackTop,
@@ -676,17 +965,18 @@ export function buildCallTree(steps: StepData[], frames: CallFrame[]): CallTreeN
         else if (op === 0x55 && step.stackTop) {
             // Backend records step_idx = step_count AFTER the +1 increment in step(),
             // so the storage change for step i is keyed by i+1.
-            const sc = storageChangeMap.get(`${step.contextId}:${i + 1}`);
+            const sc = scForStep;
             nodes.push({
                 id: nodes.length,
                 type: 'sstore',
                 stepIndex: i,
+                transactionId: stepTid,
                 contextId: step.contextId,
                 depth: step.depth + 1,
                 slot: step.stackTop,
                 oldValue: sc?.hadValue,
                 newValue: sc?.newValue ?? step.stackSecond,
-                reverted: revertedContextIds.has(step.contextId),
+                reverted: revertedScopes.has(sk),
             });
         }
         // TLOAD (0x5c): transient storage load, stack top = slot
@@ -695,6 +985,7 @@ export function buildCallTree(steps: StepData[], frames: CallFrame[]): CallTreeN
                 id: nodes.length,
                 type: 'tload',
                 stepIndex: i,
+                transactionId: stepTid,
                 contextId: step.contextId,
                 depth: step.depth + 1,
                 slot: step.stackTop,
@@ -702,34 +993,36 @@ export function buildCallTree(steps: StepData[], frames: CallFrame[]): CallTreeN
         }
         // TSTORE (0x5d): transient storage write, stack[top]=slot, stack[top-1]=value
         else if (op === 0x5d && step.stackTop) {
-            const sc = storageChangeMap.get(`${step.contextId}:${i + 1}`);
+            const sc = scForStep;
             nodes.push({
                 id: nodes.length,
                 type: 'tstore',
                 stepIndex: i,
+                transactionId: stepTid,
                 contextId: step.contextId,
                 depth: step.depth + 1,
                 slot: step.stackTop,
                 oldValue: sc?.hadValue,
                 newValue: sc?.newValue ?? step.stackSecond,
-                reverted: revertedContextIds.has(step.contextId),
+                reverted: revertedScopes.has(sk),
             });
         }
         // LOG0-LOG4 (0xa0-0xa4): consume from per-context log queue
         else if (op >= 0xa0 && op <= 0xa4) {
-            const queue = logQueueByContext.get(step.contextId) ?? [];
-            const ptr = logPtrByContext.get(step.contextId) ?? 0;
+            const queue = logQueueByScope.get(sk) ?? [];
+            const ptr = logPtrByScope.get(sk) ?? 0;
             const logEntry = queue[ptr];
-            logPtrByContext.set(step.contextId, ptr + 1);
+            logPtrByScope.set(sk, ptr + 1);
             nodes.push({
                 id: nodes.length,
                 type: 'log',
                 stepIndex: i,
+                transactionId: stepTid,
                 contextId: step.contextId,
                 depth: step.depth + 1,
                 topics: logEntry?.topics ?? [],
                 logData: logEntry?.data,
-                reverted: revertedContextIds.has(step.contextId),
+                reverted: revertedScopes.has(sk),
             });
         }
     }

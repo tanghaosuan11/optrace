@@ -37,7 +37,6 @@ import {
   type SolPacked,
 } from "@/lib/contractSlots";
 
-// ── 常用 primitive 候选 ──────────────────────────────────────────
 const PRIMITIVE_SUGGESTIONS = [
   "address", "bool",
   "uint8", "uint16", "uint32", "uint64", "uint128", "uint256",
@@ -45,8 +44,6 @@ const PRIMITIVE_SUGGESTIONS = [
   "bytes1", "bytes2", "bytes4", "bytes8", "bytes16", "bytes20", "bytes32",
   "bytes", "string",
 ];
-
-// ── SolType 编辑器（递归）────────────────────────────────────────
 
 interface TypeEditorProps {
   value: SolType;
@@ -269,8 +266,6 @@ function PackedEditor({ value, onChange }: { value: SolPacked; onChange: (t: Sol
   );
 }
 
-// ── 单条 SlotInfo 表单 ───────────────────────────────────────────
-
 interface SlotFormState {
   slotHex: string;
   name: string;
@@ -301,8 +296,6 @@ const defaultFormState: SlotFormState = {
   type: { kind: "primitive", type: "uint256" },
   slotError: "",
 };
-
-// ── 主组件 ───────────────────────────────────────────────────────
 
 export interface SlotAnnotationDrawerProps {
   open: boolean;
@@ -413,7 +406,6 @@ export function SlotAnnotationDrawer({
       >
         <SheetTitle className="sr-only">Slot Annotations</SheetTitle>
 
-        {/* ── 标题栏 ── */}
         <div className="flex items-center gap-2 px-4 py-3 border-b shrink-0">
           <div className="flex flex-col flex-1 min-w-0">
             <span className="text-sm font-semibold">Slot Annotations</span>
@@ -438,7 +430,6 @@ export function SlotAnnotationDrawer({
           >✕</button>
         </div>
 
-        {/* ── 已有列表 ── */}
         <div className="flex-1 overflow-y-auto min-h-0">
           {slots.length === 0 && editingIndex === null && !isFormDirty && (
             <div className="flex items-center justify-center h-24 text-muted-foreground text-sm">
@@ -472,7 +463,6 @@ export function SlotAnnotationDrawer({
           ))}
         </div>
 
-        {/* ── 表单区域 ── */}
         <div className="border-t shrink-0 bg-muted/20">
           <div className="px-4 pt-3 pb-1 flex items-center justify-between">
             <span className="text-xs font-semibold text-muted-foreground">

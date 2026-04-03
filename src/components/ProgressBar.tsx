@@ -1,12 +1,29 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import type { CSSProperties } from "react";
 import { Slider } from "@/components/ui/slider";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useDebugStore } from "@/store/debugStore";
-import { Scissors } from "lucide-react";
+import { Circle, Scissors } from "lucide-react";
 
 interface ProgressBarProps {
   onSeekTo: (index: number) => void;
   onSpeedChange: (speed: number) => void;
+}
+
+/** 多笔：叠在滑条上的点（absolute，不占额外布局）；近重合为一颗点（位置取簇中心，跳转取最左 tx） */
+interface TxJumpDot {
+  pct: number;
+  step: number;
+  title: string;
+}
+
+const TX_DOT_OVERLAP_THRESH_PCT = 1.2;
+
+/** 滑条下方一行：图标垂直居中于条内 */
+function txMarkerRowStyle(pct: number): CSSProperties {
+  if (pct <= 0.25) return { left: 0, top: "50%", transform: "translateY(-50%)" };
+  if (pct >= 99.75) return { left: "100%", top: "50%", transform: "translate(-100%, -50%)" };
+  return { left: `${pct}%`, top: "50%", transform: "translate(-50%, -50%)" };
 }
 
 // Speed mapping: slider position 0 → 1x, positions 1-20 → 5,10,...,100x
@@ -26,6 +43,7 @@ export function ProgressBar({
   const rangeEnabled = useDebugStore((s) => s.rangeEnabled);
   const rangeStart = useDebugStore((s) => s.rangeStart);
   const rangeEnd = useDebugStore((s) => s.rangeEnd);
+  const txBoundaries = useDebugStore((s) => s.txBoundaries);
   const [jumpFocused, setJumpFocused] = useState(false);
   const [jumpInput, setJumpInput] = useState("");
 
@@ -40,6 +58,11 @@ export function ProgressBar({
   const [rangeStartInput, setRangeStartInput] = useState("");
   const [rangeEndInput, setRangeEndInput] = useState("");
   const [popoverOpen, setPopoverOpen] = useState(false);
+  const sync = useDebugStore.getState().sync;
+  const setRangeStart = useCallback((v: number) => sync({ rangeStart: v }), [sync]);
+  const setRangeEnd = useCallback((v: number) => sync({ rangeEnd: v }), [sync]);
+  const setRange = useCallback((s: number, e: number) => sync({ rangeStart: s, rangeEnd: e }), [sync]);
+  const setRangeEnabled = useCallback((enabled: boolean) => sync({ rangeEnabled: enabled }), [sync]);
   // 记录当前正在拖动的 thumb index（0=rangeStart, 1=currentStep, 2=rangeEnd）
   const activeThumbRef = useRef<number | null>(null);
 
@@ -69,12 +92,82 @@ export function ProgressBar({
   // stepCount 变化时重置 range 到全部范围
   useEffect(() => {
     if (stepCount > 0) {
-      useDebugStore.getState().sync({ rangeStart: 0, rangeEnd: stepCount - 1 });
+      setRange(0, stepCount - 1);
     }
-  }, [stepCount]);
+  }, [stepCount, setRange]);
 
   // 滑块值显示：拖动中用本地值，松开后用 store 值
   const displayValue = draggingValue ?? currentStepIndex;
+
+  const multiTxLabel = useMemo(() => {
+    if (!txBoundaries?.length) return null;
+    const g = Math.max(0, currentStepIndex);
+    let txIdx = 0;
+    for (let i = 0; i < txBoundaries.length; i++) {
+      if (g >= txBoundaries[i]) txIdx = i + 1;
+    }
+    return `Tx ${txIdx + 1}/${txBoundaries.length + 1}`;
+  }, [currentStepIndex, txBoundaries]);
+
+  const txJumpDots = useMemo((): TxJumpDot[] => {
+    const hi = Math.max(0, stepCount - 1);
+    if (!txBoundaries?.length || hi <= 0) return [];
+    type P = { step: number; pct: number; title: string };
+    const raw: P[] = [];
+    if (!txBoundaries.includes(0)) {
+      raw.push({
+        step: 0,
+        pct: 0,
+        title: `Tx 1 · step 1 / ${stepCount}`,
+      });
+    }
+    for (let i = 0; i < txBoundaries.length; i++) {
+      const step = txBoundaries[i];
+      raw.push({
+        step,
+        pct: (step / hi) * 100,
+        title: `Tx ${i + 2} · step ${step + 1} / ${stepCount}`,
+      });
+    }
+    raw.sort((a, b) => a.pct - b.pct || a.step - b.step);
+    const seen = new Set<number>();
+    const points = raw.filter((d) => {
+      if (seen.has(d.step)) return false;
+      seen.add(d.step);
+      return true;
+    });
+    if (points.length === 0) return [];
+
+    const out: TxJumpDot[] = [];
+    let i = 0;
+    while (i < points.length) {
+      const start = i;
+      let j = i + 1;
+      while (
+        j < points.length &&
+        points[j].pct - points[j - 1].pct < TX_DOT_OVERLAP_THRESH_PCT
+      ) {
+        j += 1;
+      }
+      const slice = points.slice(start, j);
+      if (slice.length === 1) {
+        const p = slice[0];
+        out.push({ pct: p.pct, step: p.step, title: p.title });
+      } else {
+        const minPct = slice[0].pct;
+        const maxPct = slice[slice.length - 1].pct;
+        const pct = (minPct + maxPct) / 2;
+        const step = Math.min(...slice.map((s) => s.step));
+        out.push({
+          pct,
+          step,
+          title: slice.map((s) => s.title).join(" · "),
+        });
+      }
+      i = j;
+    }
+    return out;
+  }, [txBoundaries, stepCount]);
 
   const handleSliderChange = ([v]: number[]) => {
     setDraggingValue(v);
@@ -118,7 +211,7 @@ export function ProgressBar({
     if (activeIdx === 0) {
       // 拖动 rangeStart：只更新 rangeStart，不 seek
       const newRs = Math.max(0, Math.min(values[0], maxIdx));
-      useDebugStore.getState().sync({ rangeStart: newRs });
+      setRangeStart(newRs);
     } else if (activeIdx === 1) {
       // 拖动 currentStep：只 seek，不改范围
       const cur = values[1];
@@ -133,25 +226,25 @@ export function ProgressBar({
     } else if (activeIdx === 2) {
       // 拖动 rangeEnd：只更新 rangeEnd，不 seek
       const newRe = Math.max(0, Math.min(values[2], maxIdx));
-      useDebugStore.getState().sync({ rangeEnd: newRe });
+      setRangeEnd(newRe);
     }
-  }, [stepCount, onSeekTo]);
+  }, [stepCount, onSeekTo, setRangeStart, setRangeEnd]);
 
   const handleRangeSliderCommit = useCallback((values: number[]) => {
     const activeIdx = activeThumbRef.current;
     activeThumbRef.current = null;
     const maxIdx = stepCount - 1;
     if (activeIdx === 0) {
-      useDebugStore.getState().sync({ rangeStart: Math.max(0, Math.min(values[0], maxIdx)) });
+      setRangeStart(Math.max(0, Math.min(values[0], maxIdx)));
     } else if (activeIdx === 1) {
       if (throttleTimerRef.current) { clearTimeout(throttleTimerRef.current); throttleTimerRef.current = null; }
       pendingValueRef.current = null;
       awaitingCommitRef.current = true;
       onSeekTo(values[1]);
     } else if (activeIdx === 2) {
-      useDebugStore.getState().sync({ rangeEnd: Math.max(0, Math.min(values[2], maxIdx)) });
+      setRangeEnd(Math.max(0, Math.min(values[2], maxIdx)));
     }
-  }, [stepCount, onSeekTo]);
+  }, [stepCount, onSeekTo, setRangeStart, setRangeEnd]);
 
   // 提交 popover input
   const commitRangeInput = useCallback(() => {
@@ -163,10 +256,10 @@ export function ProgressBar({
     s = Math.max(0, Math.min(s, maxIdx));
     e = Math.max(0, Math.min(e, maxIdx));
     if (e - s < 1) { e = Math.min(s + 1, maxIdx); s = e - 1; }
-    useDebugStore.getState().sync({ rangeStart: s, rangeEnd: e });
+    setRange(s, e);
     setRangeStartInput(String(s + 1));
     setRangeEndInput(String(e + 1));
-  }, [stepCount, rangeStartInput, rangeEndInput]);
+  }, [stepCount, rangeStartInput, rangeEndInput, setRange]);
 
   const maxIdx = Math.max(0, stepCount - 1);
 
@@ -177,7 +270,7 @@ export function ProgressBar({
         <input
           type="checkbox"
           checked={rangeEnabled}
-          onChange={(ev) => useDebugStore.getState().sync({ rangeEnabled: ev.target.checked })}
+          onChange={(ev) => setRangeEnabled(ev.target.checked)}
           className="h-3 w-3 rounded border cursor-pointer accent-primary"
           title="Enable range playback"
         />
@@ -219,32 +312,77 @@ export function ProgressBar({
         </Popover>
       </div>
 
-      {/* Slider: normal or range mode */}
-      {rangeEnabled ? (
-        <Slider
-          className="flex-1 min-w-[80px] [&_[data-index='0']]:h-2.5 [&_[data-index='0']]:w-2.5 [&_[data-index='0']]:border-orange-400 [&_[data-index='2']]:h-2.5 [&_[data-index='2']]:w-2.5 [&_[data-index='2']]:border-orange-400 [&_[data-index='1']]:z-10"
-          min={0}
-          max={maxIdx}
-          step={1}
-          minStepsBetweenThumbs={0}
-          value={[rangeStart, displayValue, rangeEnd]}
-          onValueChange={handleRangeSliderChange}
-          onValueCommit={handleRangeSliderCommit}
-          onThumbPointerDown={(i) => { activeThumbRef.current = i; }}
-        />
-      ) : (
-        <Slider
-          className="flex-1 min-w-[80px]"
-          min={0}
-          max={maxIdx}
-          step={1}
-          value={[displayValue]}
-          onValueChange={handleSliderChange}
-          onValueCommit={handleSliderCommit}
-          disabled={isPlaying}
-        />
-      )}
+      {/* Slider；多笔圆点 absolute 叠在滑条下方，不占布局高度 */}
+      <div className="relative min-w-[80px] flex-1 overflow-visible">
+        {rangeEnabled ? (
+          <Slider
+            className="relative z-0 w-full [&_[data-index='0']]:h-2.5 [&_[data-index='0']]:w-2.5 [&_[data-index='0']]:border-orange-400 [&_[data-index='2']]:h-2.5 [&_[data-index='2']]:w-2.5 [&_[data-index='2']]:border-orange-400 [&_[data-index='1']]:z-10"
+            min={0}
+            max={maxIdx}
+            step={1}
+            minStepsBetweenThumbs={0}
+            value={[rangeStart, displayValue, rangeEnd]}
+            onValueChange={handleRangeSliderChange}
+            onValueCommit={handleRangeSliderCommit}
+            onThumbPointerDown={(i) => { activeThumbRef.current = i; }}
+          />
+        ) : (
+          <Slider
+            className="relative z-0 w-full"
+            min={0}
+            max={maxIdx}
+            step={1}
+            value={[displayValue]}
+            onValueChange={handleSliderChange}
+            onValueCommit={handleSliderCommit}
+            disabled={isPlaying}
+          />
+        )}
+        {txJumpDots.length > 0 && (
+          <div
+            className="pointer-events-none absolute inset-x-0 top-full z-20 mt-0.5 h-3"
+            role="group"
+            aria-label="Jump to transaction start"
+          >
+            {txJumpDots.map((d, idx) => (
+              <span
+                key={`${d.step}-${idx}`}
+                role="button"
+                tabIndex={0}
+                className="pointer-events-auto absolute inline-flex cursor-pointer items-center justify-center outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-offset-1 rounded-full"
+                style={txMarkerRowStyle(d.pct)}
+                title={d.title}
+                aria-label={d.title}
+                onPointerDown={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  onSeekTo(Math.max(0, Math.min(d.step, maxIdx)));
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onSeekTo(Math.max(0, Math.min(d.step, maxIdx)));
+                  }
+                }}
+              >
+                <Circle
+                  strokeWidth={0}
+                  fill="currentColor"
+                  className="h-2 w-2 text-amber-500 pointer-events-none"
+                  aria-hidden
+                />
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
 
+      {multiTxLabel && (
+        <span className="text-[10px] text-muted-foreground font-mono shrink-0 tabular-nums" title="Multi-tx run: current / total">
+          {multiTxLabel}
+        </span>
+      )}
       <span className="text-[11px] text-muted-foreground font-mono shrink-0">{stepCount}</span>
       <input
         type="number"

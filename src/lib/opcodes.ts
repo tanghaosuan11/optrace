@@ -172,10 +172,10 @@ export interface OpcodeInfo {
 }
 
 export const OPCODE_INFO: Record<number, OpcodeInfo> = {
-  // ── Stop ──
+  // Stop
   0x00: { description: "Halts execution of the current contract call", stackInput: [], stackOutput: [], gas: "0" },
 
-  // ── Arithmetic ──
+  // Arithmetic
   0x01: { description: "Addition: pops two values and pushes their sum (mod 2^256)", stackInput: ["a", "b"], stackOutput: ["a + b"], gas: "3" },
   0x02: { description: "Multiplication: pops two values and pushes their product (mod 2^256)", stackInput: ["a", "b"], stackOutput: ["a * b"], gas: "5" },
   0x03: { description: "Subtraction: pops two values and pushes a - b (mod 2^256)", stackInput: ["a", "b"], stackOutput: ["a - b"], gas: "3" },
@@ -188,7 +188,7 @@ export const OPCODE_INFO: Record<number, OpcodeInfo> = {
   0x0a: { description: "Exponentiation: pushes a raised to the power b", stackInput: ["a", "b"], stackOutput: ["a ** b"], gas: "10*" },
   0x0b: { description: "Sign extends x from (b+1)*8 bits to 256 bits", stackInput: ["b", "x"], stackOutput: ["signextend(x, b)"], gas: "5" },
 
-  // ── Comparison & Bitwise ──
+  // Comparison & bitwise
   0x10: { description: "Less-than comparison: pushes 1 if a < b, else 0", stackInput: ["a", "b"], stackOutput: ["a < b ? 1 : 0"], gas: "3" },
   0x11: { description: "Greater-than comparison: pushes 1 if a > b, else 0", stackInput: ["a", "b"], stackOutput: ["a > b ? 1 : 0"], gas: "3" },
   0x12: { description: "Signed less-than comparison: pushes 1 if a < b (signed), else 0", stackInput: ["a", "b"], stackOutput: ["a < b ? 1 : 0 (signed)"], gas: "3" },
@@ -205,10 +205,10 @@ export const OPCODE_INFO: Record<number, OpcodeInfo> = {
   0x1d: { description: "Arithmetic right shift: shifts value right preserving the sign bit", stackInput: ["shift", "value"], stackOutput: ["value >> shift (arithmetic)"], gas: "3" },
   0x1e: { description: "Count leading zeros: pushes the number of leading zero bits in x (EIP-7939)", stackInput: ["x"], stackOutput: ["clz(x)"], gas: "5" },
 
-  // ── Hash ──
+  // Hash
   0x20: { description: "Compute Keccak-256 hash of memory[offset : offset+size]", stackInput: ["offset", "size"], stackOutput: ["hash"], memoryEffect: "Reads memory[offset : offset+size]", gas: "30+", memoryAccess: [{ offsetParam: "offset", sizeParam: "size" }] },
 
-  // ── Environmental Info ──
+  // Environmental
   0x30: { description: "Get the address of the currently executing account", stackInput: [], stackOutput: ["address"], gas: "2" },
   0x31: { description: "Get the ETH balance of the given address", stackInput: ["address"], stackOutput: ["balance"], gas: "100/2600" },
   0x32: { description: "Get the address that originated the transaction (tx.origin)", stackInput: [], stackOutput: ["origin"], gas: "2" },
@@ -226,7 +226,7 @@ export const OPCODE_INFO: Record<number, OpcodeInfo> = {
   0x3e: { description: "Copy last return data to memory", stackInput: ["destOffset", "offset", "size"], stackOutput: [], memoryEffect: "memory[destOffset:destOffset+size] = returndata[offset:offset+size]", gas: "3+", memoryAccess: [{ offsetParam: "destOffset", sizeParam: "size" }] },
   0x3f: { description: "Get the keccak256 hash of an external account's code", stackInput: ["address"], stackOutput: ["hash"], gas: "100/2600" },
 
-  // ── Block Info ──
+  // Block
   0x40: { description: "Get hash of the given block (only valid for last 256 blocks)", stackInput: ["blockNumber"], stackOutput: ["hash"], gas: "20" },
   0x41: { description: "Get the block's beneficiary address (coinbase)", stackInput: [], stackOutput: ["coinbase"], gas: "2" },
   0x42: { description: "Get the block's Unix timestamp", stackInput: [], stackOutput: ["timestamp"], gas: "2" },
@@ -240,7 +240,7 @@ export const OPCODE_INFO: Record<number, OpcodeInfo> = {
   0x4a: { description: "Get the blob base fee of the current block (EIP-7516)", stackInput: [], stackOutput: ["blobBasefee"], gas: "2" },
   0x4b: { description: "Get the current slot number (custom extension)", stackInput: [], stackOutput: ["slotNum"], gas: "2" },
 
-  // ── Stack / Memory / Storage ──
+  // Stack / memory / storage
   0x50: { description: "Remove (pop and discard) the top stack item", stackInput: ["a"], stackOutput: [], gas: "2" },
   0x51: { description: "Load 32 bytes from memory at offset", stackInput: ["offset"], stackOutput: ["value"], memoryEffect: "Reads memory[offset : offset+32]", gas: "3+", memoryAccess: [{ offsetParam: "offset", fixedSize: 32 }] },
   0x52: { description: "Store 32-byte value to memory at offset", stackInput: ["offset", "value"], stackOutput: [], memoryEffect: "memory[offset:offset+32] = value", gas: "3+", memoryAccess: [{ offsetParam: "offset", fixedSize: 32 }] },
@@ -258,7 +258,7 @@ export const OPCODE_INFO: Record<number, OpcodeInfo> = {
   0x5e: { description: "Copy memory regions within memory (Cancun, EIP-5656)", stackInput: ["dest", "src", "size"], stackOutput: [], memoryEffect: "memory[dest:dest+size] = memory[src:src+size]", gas: "3+", memoryAccess: [{ offsetParam: "dest", sizeParam: "size" }, { offsetParam: "src", sizeParam: "size" }] },
   0x5f: { description: "Push the constant value 0 onto the stack (Shanghai, EIP-3855)", stackInput: [], stackOutput: ["0"], gas: "2" },
 
-  // ── PUSH1–PUSH32 ──
+  // PUSH1–PUSH32
   0x60: { description: "Push 1-byte immediate value onto the stack", stackInput: [], stackOutput: ["value"], gas: "3" },
   0x61: { description: "Push 2-byte immediate value onto the stack", stackInput: [], stackOutput: ["value"], gas: "3" },
   0x62: { description: "Push 3-byte immediate value onto the stack", stackInput: [], stackOutput: ["value"], gas: "3" },
@@ -292,7 +292,7 @@ export const OPCODE_INFO: Record<number, OpcodeInfo> = {
   0x7e: { description: "Push 31-byte immediate value onto the stack", stackInput: [], stackOutput: ["value"], gas: "3" },
   0x7f: { description: "Push 32-byte immediate value onto the stack", stackInput: [], stackOutput: ["value"], gas: "3" },
 
-  // ── DUP1–DUP16 ──
+  // DUP1–DUP16
   0x80: { description: "Duplicate the 1st stack item", stackInput: ["a"], stackOutput: ["a", "a"], gas: "3" },
   0x81: { description: "Duplicate the 2nd stack item", stackInput: ["a", "b"], stackOutput: ["b", "a", "b"], gas: "3" },
   0x82: { description: "Duplicate the 3rd stack item",  stackInput: ["a", "...", "c"], stackInputSize: 3,  stackOutput: ["c", "a", "...", "c"], stackOutputSize: 4,  gas: "3" },
@@ -310,7 +310,7 @@ export const OPCODE_INFO: Record<number, OpcodeInfo> = {
   0x8e: { description: "Duplicate the 15th stack item", stackInput: ["a", "...", "o"], stackInputSize: 15, stackOutput: ["o", "a", "...", "o"], stackOutputSize: 16, gas: "3" },
   0x8f: { description: "Duplicate the 16th stack item", stackInput: ["a", "...", "p"], stackInputSize: 16, stackOutput: ["p", "a", "...", "p"], stackOutputSize: 17, gas: "3" },
 
-  // ── SWAP1–SWAP16 ──
+  // SWAP1–SWAP16
   0x90: { description: "Exchange 1st and 2nd stack items", stackInput: ["a", "b"], stackOutput: ["b", "a"], gas: "3" },
   0x91: { description: "Exchange 1st and 3rd stack items",  stackInput: ["a", "...", "c"], stackInputSize: 3,  stackOutput: ["c", "...", "a"], stackOutputSize: 3,  gas: "3" },
   0x92: { description: "Exchange 1st and 4th stack items",  stackInput: ["a", "...", "d"], stackInputSize: 4,  stackOutput: ["d", "...", "a"], stackOutputSize: 4,  gas: "3" },
@@ -328,19 +328,19 @@ export const OPCODE_INFO: Record<number, OpcodeInfo> = {
   0x9e: { description: "Exchange 1st and 16th stack items", stackInput: ["a", "...", "p"], stackInputSize: 16, stackOutput: ["p", "...", "a"], stackOutputSize: 16, gas: "3" },
   0x9f: { description: "Exchange 1st and 17th stack items", stackInput: ["a", "...", "q"], stackInputSize: 17, stackOutput: ["q", "...", "a"], stackOutputSize: 17, gas: "3" },
 
-  // ── Logging ──
+  // Log
   0xa0: { description: "Append log record with no topics", stackInput: ["offset", "size"], stackOutput: [], memoryEffect: "Reads memory[offset:offset+size]", gas: "375+", memoryAccess: [{ offsetParam: "offset", sizeParam: "size" }] },
   0xa1: { description: "Append log record with 1 topic", stackInput: ["offset", "size", "topic1"], stackOutput: [], memoryEffect: "Reads memory[offset:offset+size]", gas: "750+", memoryAccess: [{ offsetParam: "offset", sizeParam: "size" }] },
   0xa2: { description: "Append log record with 2 topics", stackInput: ["offset", "size", "topic1", "topic2"], stackOutput: [], memoryEffect: "Reads memory[offset:offset+size]", gas: "1125+", memoryAccess: [{ offsetParam: "offset", sizeParam: "size" }] },
   0xa3: { description: "Append log record with 3 topics", stackInput: ["offset", "size", "topic1", "topic2", "topic3"], stackOutput: [], memoryEffect: "Reads memory[offset:offset+size]", gas: "1500+", memoryAccess: [{ offsetParam: "offset", sizeParam: "size" }] },
   0xa4: { description: "Append log record with 4 topics", stackInput: ["offset", "size", "topic1", "topic2", "topic3", "topic4"], stackOutput: [], memoryEffect: "Reads memory[offset:offset+size]", gas: "1875+", memoryAccess: [{ offsetParam: "offset", sizeParam: "size" }] },
 
-  // ── EOF Stack Operations (EIP-663) ──
+  // EOF stack (EIP-663)
   0xe6: { description: "Duplicate the Nth stack item where N is given by an immediate byte (EOF EIP-663)", stackInput: ["..."], stackOutput: ["value", "..."], gas: "3" },
   0xe7: { description: "Swap the top stack item with the Nth item where N is given by an immediate byte (EOF EIP-663)", stackInput: ["a", "...", "b"], stackOutput: ["b", "...", "a"], gas: "3" },
   0xe8: { description: "Exchange two stack items at positions given by an immediate byte (EOF EIP-663)", stackInput: ["..."], stackOutput: ["..."], gas: "3" },
 
-  // ── System Operations ──
+  // System
   0xf0: { description: "Create a new contract (address derived from sender nonce)", stackInput: ["value", "offset", "size"], stackOutput: ["address"], memoryEffect: "Reads memory[offset:offset+size] as init code", gas: "32000+", memoryAccess: [{ offsetParam: "offset", sizeParam: "size" }] },
   0xf1: { description: "Call into an external account (can send ETH)", stackInput: ["gas", "addr", "value", "argsOffset", "argsSize", "retOffset", "retSize"], stackOutput: ["success"], memoryEffect: "Writes return data to memory[retOffset:retOffset+retSize]", gas: "100+", memoryAccess: [{ offsetParam: "argsOffset", sizeParam: "argsSize" }, { offsetParam: "retOffset", sizeParam: "retSize" }] },
   0xf2: { description: "Call with current account's code but target's storage (deprecated)", stackInput: ["gas", "addr", "value", "argsOffset", "argsSize", "retOffset", "retSize"], stackOutput: ["success"], gas: "100+", memoryAccess: [{ offsetParam: "argsOffset", sizeParam: "argsSize" }, { offsetParam: "retOffset", sizeParam: "retSize" }] },

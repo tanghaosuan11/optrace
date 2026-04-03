@@ -1,0 +1,89 @@
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+
+export type ForkInitPayload = {
+  tx?: string;
+  txData?: unknown;
+  blockData?: unknown;
+  condNodes?: unknown;
+  forkPatches?: unknown;
+  rpcUrl?: string;
+};
+
+export function createNewSessionId() {
+  return `sess_${crypto.randomUUID()}`;
+}
+
+export function openDebugWindow(
+  sessionId = createNewSessionId(),
+  opts?: { readonly?: boolean; mode?: "normal" | "whatif" | "cfg" },
+) {
+  const label = `debug-${sessionId}`;
+  const readonly = opts?.readonly ?? false;
+  const mode = opts?.mode ?? "normal";
+  const url = `/?sessionId=${encodeURIComponent(sessionId)}${readonly ? "&readonly=1" : ""}${mode !== "normal" ? `&mode=${encodeURIComponent(mode)}` : ""}`;
+  const w = new WebviewWindow(label, {
+    url,
+    title: `OpTrace (${sessionId.slice(0, 8)})${readonly ? " [readonly]" : ""}`,
+    width: 1500,
+    height: 900,
+  });
+  // best-effort focus
+  w.once("tauri://created", () => {
+    w.setFocus().catch(() => {});
+  });
+  return { window: w, sessionId };
+}
+
+export function openForkWindow(payload: ForkInitPayload, opts?: { readonly?: boolean }) {
+  const { window, sessionId } = openDebugWindow(undefined, { readonly: opts?.readonly ?? true, mode: "whatif" });
+  window.once("tauri://created", () => {
+    const init = { ...payload, sessionId };
+    console.log("[fork.window] emitting optrace:init", {
+      sessionId,
+      hasTx: !!init.tx,
+      hasTxData: !!init.txData,
+      hasBlockData: !!init.blockData,
+      condNodesLen: Array.isArray((init as any).condNodes) ? (init as any).condNodes.length : undefined,
+      forkPatchesLen: Array.isArray((init as any).forkPatches) ? (init as any).forkPatches.length : undefined,
+    });
+    // Avoid race: receiver may not have installed listener yet.
+    const emitOnce = (tag: string) =>
+      window.emit("optrace:init", init).then(
+        () => console.log(`[fork.window] emit optrace:init ok (${tag})`),
+        (e) => console.error(`[fork.window] emit optrace:init failed (${tag})`, e),
+      );
+    setTimeout(() => emitOnce("t+250ms"), 250);
+    setTimeout(() => emitOnce("t+1250ms"), 1250);
+  });
+  return { window, sessionId };
+}
+
+export function openCfgWindow(sessionId: string, opts?: { readonly?: boolean }) {
+  // Use debug-* prefix to satisfy existing tauri plugin allowlist.
+  // Append timestamp so re-opening after close always creates a fresh window
+  // (same label on a closed window may silently skip tauri://created in Tauri v2).
+  const label = `debug-cfg-${sessionId}-${Date.now()}`;
+  const readonly = opts?.readonly ?? true;
+  const url = `/?sessionId=${encodeURIComponent(sessionId)}${readonly ? "&readonly=1" : ""}&mode=cfg`;
+  const window = new WebviewWindow(label, {
+    url,
+    title: `OpTrace CFG (${sessionId.slice(0, 8)})`,
+    width: 1300,
+    height: 820,
+  });
+  window.once("tauri://created", () => {
+    window.setFocus().catch(() => {});
+  });
+  window.once("tauri://created", () => {
+    const init = { sessionId };
+    const emitOnce = (tag: string) =>
+      window.emit("optrace:cfg:init", init).then(
+        () => console.log(`[cfg.window] emit optrace:cfg:init ok (${tag})`),
+        (e) => console.error(`[cfg.window] emit optrace:cfg:init failed (${tag})`, e),
+      );
+    setTimeout(() => emitOnce("t+250ms"), 250);
+    setTimeout(() => emitOnce("t+1250ms"), 1250);
+  });
+  return { window, sessionId };
+}
+

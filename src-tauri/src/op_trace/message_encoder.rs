@@ -23,10 +23,9 @@ enum MsgType {
     Finished = 255,
 }
 
-// ── 常量 ──────────────────────────────────────────────────────────────────────
 
 /// 每批发送的步数上限
-const STEP_BATCH_SIZE: usize = 200;
+const STEP_BATCH_SIZE: usize = 800;
 
 /// 需要在 StepBatch 中携带栈顶 3 项的 opcode 集合
 const NEEDS_STACK: [u8; 9] = [
@@ -37,8 +36,6 @@ const NEEDS_STACK: [u8; 9] = [
     0xfa, // STATICCALL
     0xf4, // DELEGATECALL
 ];
-
-// ── MessageEncoder ────────────────────────────────────────────────────────────
 
 pub(crate) struct MessageEncoder {
     channel: Arc<Channel>,
@@ -73,11 +70,13 @@ impl MessageEncoder {
         }
     }
 
-    // ── StepBatch ─────────────────────────────────────────────────────────
 
     /// 将一步的数据追加到批量缓冲。gas_cost 字段先占位 0，需要调用 `backfill_gas_cost` 回填。
+    ///
+    /// 二进制布局每步：`transaction_id`(4) + 原字段（见 `parseStepBatch`）。
     pub fn pack_step(
         &mut self,
+        transaction_id: u32,
         pc: u64,
         op: u8,
         frame_id: u16,
@@ -86,6 +85,9 @@ impl MessageEncoder {
         stack: &[U256],
         frame_step_count: usize,
     ) {
+        // 0. Transaction ID (4 bytes, big-endian) — 单 tx 为 0
+        self.step_payload
+            .extend_from_slice(&transaction_id.to_be_bytes());
         // 1. Context ID (2 bytes)
         self.step_payload
             .extend_from_slice(&frame_id.to_be_bytes());
@@ -146,7 +148,6 @@ impl MessageEncoder {
         let _ = self.channel.send(InvokeResponseBody::Raw(packet));
     }
 
-    // ── 单条消息 ──────────────────────────────────────────────────────────
 
     /// 发送 FrameEnter（JSON 序列化的 FrameInfo）
     pub fn send_frame_enter(&self, info: &impl Serialize) {
@@ -158,17 +159,19 @@ impl MessageEncoder {
     }
 
     /// 发送 FrameExit
-    /// 格式: [type:1] [frame_id:2] [result:1] [success:1] [gas_used:8] [output_len:4] [output:N]
+    /// 格式: [type:1] [transaction_id:4] [frame_id:2] [result:1] [success:1] [gas_used:8] [output_len:4] [output:N]
     pub fn send_frame_exit(
         &self,
+        transaction_id: u32,
         frame_id: u16,
         result: InstructionResult,
         success: bool,
         gas_used: u64,
         output: &[u8],
     ) {
-        let mut packet = Vec::with_capacity(1 + 2 + 1 + 1 + 8 + 4 + output.len());
+        let mut packet = Vec::with_capacity(1 + 4 + 2 + 1 + 1 + 8 + 4 + output.len());
         packet.push(MsgType::FrameExit as u8);
+        packet.extend_from_slice(&transaction_id.to_be_bytes());
         packet.extend_from_slice(&frame_id.to_be_bytes());
         packet.push(result as u8);
         packet.push(success as u8);
@@ -179,16 +182,18 @@ impl MessageEncoder {
     }
 
     /// 发送 SelfDestruct 事件
-    /// 格式: [type:1] [frame_id:2] [contract:20] [target:20] [value:32]
+    /// 格式: [type:1] [transaction_id:4] [frame_id:2] [contract:20] [target:20] [value:32]
     pub fn send_selfdestruct(
         &self,
+        transaction_id: u32,
         frame_id: u16,
         contract: Address,
         target: Address,
         value: U256,
     ) {
-        let mut packet = Vec::with_capacity(1 + 2 + 20 + 20 + 32);
+        let mut packet = Vec::with_capacity(1 + 4 + 2 + 20 + 20 + 32);
         packet.push(MsgType::SelfDestruct as u8);
+        packet.extend_from_slice(&transaction_id.to_be_bytes());
         packet.extend_from_slice(&frame_id.to_be_bytes());
         packet.extend_from_slice(contract.as_slice());
         packet.extend_from_slice(target.as_slice());
@@ -204,21 +209,50 @@ impl MessageEncoder {
         let _ = self.channel.send(InvokeResponseBody::Raw(packet));
     }
 
-    /// 发送 Finished 信号
-    pub fn send_finished(&self) {
-        let _ = self
-            .channel
-            .send(InvokeResponseBody::Raw(vec![MsgType::Finished as u8]));
+    /// 发送 Finished 信号。
+    /// - 无 `tx_boundaries`：与旧版兼容，仅 1 字节 `MsgType::Finished`。
+    /// - 有 `tx_boundaries`：多笔调试时下发「第 2 笔起」每笔起始的 **global step 下标**（JSON，字段 `txBoundaries`）。
+    pub fn send_finished(&self, tx_boundaries: Option<&[u32]>) {
+        match tx_boundaries {
+            Some(b) if !b.is_empty() => {
+                #[derive(Serialize)]
+                struct FinishedMeta<'a> {
+                    #[serde(rename = "txBoundaries")]
+                    tx_boundaries: &'a [u32],
+                }
+                let json = serde_json::to_vec(&FinishedMeta {
+                    tx_boundaries: b,
+                })
+                .unwrap();
+                let mut packet = Vec::with_capacity(1 + json.len());
+                packet.push(MsgType::Finished as u8);
+                packet.extend_from_slice(&json);
+                let _ = self.channel.send(InvokeResponseBody::Raw(packet));
+            }
+            _ => {
+                let _ = self
+                    .channel
+                    .send(InvokeResponseBody::Raw(vec![MsgType::Finished as u8]));
+            }
+        }
     }
 
     /// 发送 ContractSource（字节码）
-    pub fn send_contract_source(&self, depth: u16, context_id: u16, bytecode: &[u8]) {
+    /// 格式: [type:1] [depth:2] [transaction_id:4] [context_id:2] [len:4] [bytecode]
+    pub fn send_contract_source(
+        &self,
+        depth: u16,
+        transaction_id: u32,
+        context_id: u16,
+        bytecode: &[u8],
+    ) {
         if bytecode.is_empty() {
             return;
         }
-        let mut packet = Vec::with_capacity(1 + 2 + 2 + 4 + bytecode.len());
+        let mut packet = Vec::with_capacity(1 + 2 + 4 + 2 + 4 + bytecode.len());
         packet.push(MsgType::ContractSource as u8);
         packet.extend_from_slice(&depth.to_be_bytes());
+        packet.extend_from_slice(&transaction_id.to_be_bytes());
         packet.extend_from_slice(&context_id.to_be_bytes());
         packet.extend_from_slice(&(bytecode.len() as u32).to_be_bytes());
         packet.extend_from_slice(bytecode);
@@ -226,18 +260,33 @@ impl MessageEncoder {
     }
 
     /// 发送 ContextUpdateAddress（CREATE 后回填部署地址）
-    pub fn send_frame_update_address(&self, context_id: u16, address: Address) {
-        let mut packet = Vec::with_capacity(1 + 2 + 20);
+    /// 格式: [type:1] [transaction_id:4] [context_id:2] [address:20]
+    pub fn send_frame_update_address(
+        &self,
+        transaction_id: u32,
+        context_id: u16,
+        address: Address,
+    ) {
+        let mut packet = Vec::with_capacity(1 + 4 + 2 + 20);
         packet.push(MsgType::ContextUpdateAddress as u8);
+        packet.extend_from_slice(&transaction_id.to_be_bytes());
         packet.extend_from_slice(&context_id.to_be_bytes());
         packet.extend_from_slice(address.as_slice());
         let _ = self.channel.send(InvokeResponseBody::Raw(packet));
     }
 
     /// 发送 ReturnData（RETURN / REVERT 输出）
-    pub fn send_return_data(&self, context_id: u16, step_count: usize, data: &[u8]) {
-        let mut packet = Vec::with_capacity(1 + 2 + 8 + data.len());
+    /// 格式: [type:1] [transaction_id:4] [context_id:2] [step_count:8] [data]
+    pub fn send_return_data(
+        &self,
+        transaction_id: u32,
+        context_id: u16,
+        step_count: usize,
+        data: &[u8],
+    ) {
+        let mut packet = Vec::with_capacity(1 + 4 + 2 + 8 + data.len());
         packet.push(MsgType::ReturnData as u8);
+        packet.extend_from_slice(&transaction_id.to_be_bytes());
         packet.extend_from_slice(&context_id.to_be_bytes());
         packet.extend_from_slice(&step_count.to_be_bytes());
         packet.extend_from_slice(data);
@@ -245,24 +294,26 @@ impl MessageEncoder {
     }
 
     /// 发送 StorageChange
-    /// 格式: [type:1] [storage_type:1] [frame_id:2] [step_index:8] [address:20] [slot:32] [old:32] [new:32]
+    /// 格式: [type:1] [storage_type:1] [frame_id:2] [step_index:8] [transaction_id:4] [address:20] [slot:32] [old:32] [new:32]
     pub fn send_storage_change(
         &self,
         is_transient: bool,
-        is_read:bool,
+        is_read: bool,
         frame_id: u16,
         step_index: usize,
+        transaction_id: u32,
         address: Address,
         key: StorageKey,
         old_value: StorageValue,
         new_value: StorageValue,
     ) {
-        let mut packet = Vec::with_capacity(1 + 1 + 1 + 2 + 8 + 20 + 32 + 32 + 32);
+        let mut packet = Vec::with_capacity(1 + 1 + 1 + 2 + 8 + 4 + 20 + 32 + 32 + 32);
         packet.push(MsgType::StorageChange as u8);
         packet.push(is_transient as u8);
         packet.push(is_read as u8);
         packet.extend_from_slice(&frame_id.to_be_bytes());
         packet.extend_from_slice(&step_index.to_be_bytes());
+        packet.extend_from_slice(&transaction_id.to_be_bytes());
         packet.extend_from_slice(address.as_slice());
         packet.extend_from_slice(&key.to_be_bytes::<32>());
         packet.extend_from_slice(&old_value.to_be_bytes::<32>());
@@ -271,12 +322,20 @@ impl MessageEncoder {
     }
 
     /// 发送 Logs（JSON 序列化的 Log）
-    pub fn send_logs(&self, context_id: u16, step_index: usize, log: &Log) {
+    /// 布局：`[type:1][context_id:2][step_index:8 BE][transaction_id:4 BE][json...]`
+    pub fn send_logs(
+        &self,
+        context_id: u16,
+        step_index: usize,
+        transaction_id: u32,
+        log: &Log,
+    ) {
         let json = serde_json::to_string(log).unwrap();
-        let mut packet = Vec::with_capacity(1 + 2 + 8 + json.len());
+        let mut packet = Vec::with_capacity(1 + 2 + 8 + 4 + json.len());
         packet.push(MsgType::Logs as u8);
         packet.extend_from_slice(&context_id.to_be_bytes());
         packet.extend_from_slice(&step_index.to_be_bytes());
+        packet.extend_from_slice(&transaction_id.to_be_bytes());
         packet.extend_from_slice(json.as_bytes());
         let _ = self.channel.send(InvokeResponseBody::Raw(packet));
     }

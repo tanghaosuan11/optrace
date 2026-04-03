@@ -5,7 +5,6 @@
  */
 import { load, type Store } from "@tauri-apps/plugin-store";
 
-// ── 内置脚本（?raw import） ───────────────────────────────────
 import guideCode from "./analysis-scripts/guide.js?raw";
 import gasTopCode from "./analysis-scripts/gas-top.js?raw";
 import sstoreSummaryCode from "./analysis-scripts/sstore-summary.js?raw";
@@ -32,7 +31,6 @@ export const BUILTIN_SCRIPTS: ScriptEntry[] = [
   { id: "builtin:log-summary",    name: "Log Summary",        code: logSummaryCode,      readonly: true, updatedAt: 0 },
 ];
 
-// ── Tauri Store 单例 ─────────────────────────────────────────
 let _store: Store | null = null;
 let _loading: Promise<Store> | null = null;
 
@@ -46,8 +44,6 @@ async function getScriptsStore(): Promise<Store> {
   }
   return _loading;
 }
-
-// ── 用户脚本 CRUD ────────────────────────────────────────────
 
 export interface UserScript {
   id: string;
@@ -75,8 +71,6 @@ export async function deleteUserScript(id: string): Promise<void> {
   const all = ((await s.get<UserScript[]>("scripts")) ?? []).filter((x) => x.id !== id);
   await s.set("scripts", all);
 }
-
-// ── 合并列表 ─────────────────────────────────────────────────
 
 export function mergeScripts(userScripts: UserScript[]): ScriptEntry[] {
   return [

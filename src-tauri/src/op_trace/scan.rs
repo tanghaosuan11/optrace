@@ -1,18 +1,19 @@
-// 条件断点全量扫描
-// 对 trace 进行并行扫描，返回命中条件组的步骤列表。
+// 条件扫描：并行遍历 trace，返回命中步骤。
 
 use super::debug_session;
 use revm::primitives::U256;
 use serde::{Deserialize, Serialize};
 
 
-/// 单条条件断点
+/// 单条扫描条件
 #[derive(Deserialize)]
 pub struct ScanCondition {
     pub _id: String,
     #[serde(rename = "type")]
-    pub cond_type: String, // "sstore_slot" | "sload_slot" | "call_address" | "call_selector" | "log_topic" | "contract_address" | "target_address"
-    pub value: String,     // hex string
+    // sstore_key|sstore_value|sload_key|sload_value|call_address|call_selector|log_topic|contract_address|target_address|frame_call_address (+ legacy sstore_slot|sload_slot)
+    pub cond_type: String,
+    // hex string
+    pub value: String,
 }
 
 /// 条件组（组内 AND/OR，组间 OR）
@@ -24,31 +25,33 @@ pub struct ConditionGroup {
     pub conditions: Vec<ScanCondition>,
 }
 
-/// 单条命中结果
+/// 命中项
 #[derive(Serialize)]
 pub struct ScanHit {
     pub step_index: usize,
+    pub transaction_id: u32,
     pub context_id: u16,
     pub pc: u32,
     pub opcode: u8,
     pub description: String,
+    /// 命中的条件类型（与前端 PauseConditionType 一致）
+    pub cond_types: Vec<String>,
 }
 
-// ── 辅助函数 ──────────────────────────────────────────────────────────────────
 
-/// 规范化 hex：去 0x、小写、不补齐
+/// 规范化 hex：去掉 0x，转小写
 fn normalize_hex(s: &str) -> String {
     s.trim_start_matches("0x")
         .trim_start_matches("0X")
         .to_ascii_lowercase()
 }
 
-/// U256 → 64 char hex（无 0x 前缀）
+/// U256 转 64 位 hex（无 0x）
 fn u256_to_hex64(v: &U256) -> String {
     format!("{:064x}", v)
 }
 
-/// 预处理后的单条条件（避免在循环内重复搬运字符串）
+/// 预处理后的条件
 struct PreparedCond {
     cond_type: String,
     target: String,
@@ -67,36 +70,73 @@ impl PreparedCond {
     }
 }
 
-/// 检测单条条件是否命中当前步骤，返回命中描述或 None
+/// 检查单条条件是否命中，返回描述和条件类型
+/// `step_global_index` 是 `session.trace` 的下标（`storage_changes.step_index = global_index + 1`）
 fn check_single(
+    step_global_index: usize,
     step: &debug_session::TraceStep,
     pc: &PreparedCond,
-    mem_cache: &mut std::collections::HashMap<(u16, u32), Vec<u8>>,
+    mem_cache: &mut std::collections::HashMap<(u32, u16, u32), Vec<u8>>,
     session: &debug_session::DebugSession,
-) -> Option<String> {
+) -> Option<(String, String)> {
     let op = step.opcode;
+    let ct = || pc.cond_type.clone();
     match pc.cond_type.as_str() {
-        "sstore_slot" => {
-            if op != 0x55 || step.stack.is_empty() {
+        "sstore_key" | "sstore_slot" => {
+            if (op != 0x55 && op != 0x5d) || step.stack.is_empty() {
                 return None;
             }
             let slot = u256_to_hex64(step.stack.last().unwrap());
             if slot == pc.target_padded64 {
-                Some(format!("SSTORE slot 0x{}", pc.target))
+                let opn = if op == 0x55 { "SSTORE" } else { "TSTORE" };
+                Some((format!("{} key slot 0x{}", opn, pc.target), ct()))
             } else {
                 None
             }
         }
-        "sload_slot" => {
-            if op != 0x54 || step.stack.is_empty() {
+        "sstore_value" => {
+            if (op != 0x55 && op != 0x5d) || step.stack.len() < 2 {
+                return None;
+            }
+            let val = u256_to_hex64(&step.stack[step.stack.len() - 2]);
+            if val == pc.target_padded64 {
+                let opn = if op == 0x55 { "SSTORE" } else { "TSTORE" };
+                Some((format!("{} value 0x{}", opn, pc.target), ct()))
+            } else {
+                None
+            }
+        }
+        "sload_key" | "sload_slot" => {
+            if (op != 0x54 && op != 0x5c) || step.stack.is_empty() {
                 return None;
             }
             let slot = u256_to_hex64(step.stack.last().unwrap());
             if slot == pc.target_padded64 {
-                Some(format!("SLOAD slot 0x{}", pc.target))
+                let opn = if op == 0x54 { "SLOAD" } else { "TLOAD" };
+                Some((format!("{} key slot 0x{}", opn, pc.target), ct()))
             } else {
                 None
             }
+        }
+        "sload_value" => {
+            if op != 0x54 && op != 0x5c {
+                return None;
+            }
+            let expect = step_global_index.saturating_add(1);
+            for c in &session.storage_changes {
+                if !c.is_read || c.transaction_id != step.transaction_id || c.frame_id != step.context_id {
+                    continue;
+                }
+                if c.step_index != expect {
+                    continue;
+                }
+                let val = u256_to_hex64(&c.new_value);
+                if val == pc.target_padded64 {
+                    let opn = if op == 0x54 { "SLOAD" } else { "TLOAD" };
+                    return Some((format!("{} loaded value 0x{}", opn, pc.target), ct()));
+                }
+            }
+            None
         }
         "call_address" => {
             if op != 0xf1 && op != 0xfa && op != 0xf4 {
@@ -114,7 +154,7 @@ fn check_single(
                     0xfa => "STATICCALL",
                     _ => "DELEGATECALL",
                 };
-                Some(format!("{} → 0x{}", op_name, pc.target))
+                Some((format!("{} → 0x{}", op_name, pc.target), ct()))
             } else {
                 None
             }
@@ -140,9 +180,13 @@ fn check_single(
                 return None;
             }
             let mem = mem_cache
-                .entry((step.context_id, step.frame_step))
+                .entry((step.transaction_id, step.context_id, step.frame_step))
                 .or_insert_with(|| {
-                    session.compute_memory_at_step(step.context_id, step.frame_step)
+                    session.compute_memory_at_step(
+                        step.transaction_id,
+                        step.context_id,
+                        step.frame_step,
+                    )
                 });
             if args_offset + 4 > mem.len() {
                 return None;
@@ -165,7 +209,7 @@ fn check_single(
                     0xfa => "STATICCALL",
                     _ => "DELEGATECALL",
                 };
-                Some(format!("{} selector 0x{}", op_name, target_sel))
+                Some((format!("{} selector 0x{}", op_name, target_sel), ct()))
             } else {
                 None
             }
@@ -176,7 +220,7 @@ fn check_single(
             }
             let topic = u256_to_hex64(&step.stack[step.stack.len() - 3]);
             if topic == pc.target_padded64 {
-                Some(format!("LOG topic 0x{}", pc.target))
+                Some((format!("LOG topic 0x{}", pc.target), ct()))
             } else {
                 None
             }
@@ -185,7 +229,7 @@ fn check_single(
             let addr_hex = format!("{:040x}", step.contract_address);
             let target_trimmed = pc.target.trim_start_matches('0');
             if addr_hex.ends_with(target_trimmed) {
-                Some(format!("Contract 0x{}", pc.target))
+                Some((format!("Contract 0x{}", pc.target), ct()))
             } else {
                 None
             }
@@ -194,7 +238,16 @@ fn check_single(
             let addr_hex = format!("{:040x}", step.call_target);
             let target_trimmed = pc.target.trim_start_matches('0');
             if addr_hex.ends_with(target_trimmed) {
-                Some(format!("Target 0x{}", pc.target))
+                Some((format!("Target 0x{}", pc.target), ct()))
+            } else {
+                None
+            }
+        }
+        "frame_call_address" => {
+            let addr_hex = format!("{:040x}", step.call_target);
+            let target_trimmed = pc.target.trim_start_matches('0');
+            if addr_hex.ends_with(target_trimmed) {
+                Some((format!("Frame call target 0x{}", pc.target), ct()))
             } else {
                 None
             }
@@ -203,11 +256,10 @@ fn check_single(
     }
 }
 
-// ── 主扫描入口 ────────────────────────────────────────────────────────────────
-
 pub fn scan_conditions_impl(
     session: &debug_session::DebugSession,
     groups: &[ConditionGroup],
+    transaction_id: Option<u32>,
 ) -> Vec<ScanHit> {
     use rayon::prelude::*;
 
@@ -215,7 +267,7 @@ pub fn scan_conditions_impl(
         return Vec::new();
     }
 
-    // 预处理所有组中的条件
+    // 预处理条件，减少循环内分配
     struct PreparedGroup {
         logic: String,
         conditions: Vec<PreparedCond>,
@@ -236,13 +288,18 @@ pub fn scan_conditions_impl(
         .enumerate()
         .flat_map(|(chunk_idx, chunk)| {
             let base = chunk_idx * CHUNK;
-            let mut mem_cache: std::collections::HashMap<(u16, u32), Vec<u8>> =
+            let mut mem_cache: std::collections::HashMap<(u32, u16, u32), Vec<u8>> =
                 std::collections::HashMap::new();
             let mut local_hits = Vec::new();
 
             'step: for (j, step) in chunk.iter().enumerate() {
                 let i = base + j;
-                // 组间 OR：任意一组命中即暂停
+                if let Some(tid) = transaction_id {
+                    if step.transaction_id != tid {
+                        continue 'step;
+                    }
+                }
+                // 组间 OR
                 for group in &prepared_groups {
                     let is_and = group.logic == "AND";
                     if group.conditions.is_empty() {
@@ -250,23 +307,25 @@ pub fn scan_conditions_impl(
                     }
 
                     let mut descriptions: Vec<String> = Vec::new();
-                    let mut group_hit = is_and; // AND 初始 true，OR 初始 false
+                    let mut cond_types_hit: Vec<String> = Vec::new();
+                    let mut group_hit = is_and;
 
                     for cond in &group.conditions {
-                        let result = check_single(step, cond, &mut mem_cache, session);
+                        let result = check_single(i, step, cond, &mut mem_cache, session);
                         if is_and {
-                            if let Some(desc) = result {
+                            if let Some((desc, cty)) = result {
                                 descriptions.push(desc);
+                                cond_types_hit.push(cty);
                             } else {
                                 group_hit = false;
-                                break; // AND 短路
+                                break;
                             }
                         } else {
-                            // OR：任意一个命中即可
-                            if let Some(desc) = result {
+                            if let Some((desc, cty)) = result {
                                 group_hit = true;
                                 descriptions.push(desc);
-                                break; // OR 短路
+                                cond_types_hit.push(cty);
+                                break;
                             }
                         }
                     }
@@ -274,12 +333,14 @@ pub fn scan_conditions_impl(
                     if group_hit && !descriptions.is_empty() {
                         local_hits.push(ScanHit {
                             step_index: i,
+                            transaction_id: step.transaction_id,
                             context_id: step.context_id,
                             pc: step.pc,
                             opcode: step.opcode,
                             description: descriptions.join(" AND "),
+                            cond_types: cond_types_hit,
                         });
-                        continue 'step; // 已命中，不重复记录同一步骤
+                        continue 'step;
                     }
                 }
             }

@@ -1,16 +1,8 @@
-/**
- * monacoSetup.ts
- * 必须在任何 <Editor> 渲染之前作为 side-effect import。
- * - 用本地 bundle（而非 CDN）初始化 Monaco
- * - 注册 Solidity Monarch 高亮
- */
+/** Side-effect import before any <Editor>. Local Monaco + Solidity Monarch (no CDN). */
 import * as monaco from "monaco-editor";
 import { loader } from "@monaco-editor/react";
 
-// ── 1. 告诉 Monaco 如何获取 Worker ───────────────────────────────────────────
-// 我们只用 Monarch（主线程）做高亮，read-only 模式不需要真正的 language server。
-// 返回一个空 blob worker 以消除 "Could not create web worker" 警告，
-// 同时避免使用 Vite 专有的 ?worker 语法。
+// Empty blob worker: Monarch stays on main thread; silences missing-worker warnings (Tauri, no Vite ?worker).
 (window as unknown as Record<string, unknown>).MonacoEnvironment = {
   getWorker(_moduleId: unknown, _label: string): Worker {
     const blobUrl = URL.createObjectURL(
@@ -20,11 +12,8 @@ import { loader } from "@monaco-editor/react";
   },
 };
 
-// ── 2. 告诉 @monaco-editor/react 使用本地 monaco 而非 CDN ──────────────────
-// Tauri 离线运行，不能依赖 CDN
 loader.config({ monaco });
 
-// ── 3. Solidity Monarch 语法高亮 ──────────────────────────────────────────────
 const SOL_LANG = "solidity";
 
 // 避免重复注册（HMR 场景）

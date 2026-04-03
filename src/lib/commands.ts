@@ -10,8 +10,6 @@
  *   3. 在 shortcuts.ts 中绑定快捷键（可选）
  */
 
-// ── 所有命令 ID ───────────────────────────────────────────────────────────────
-
 export type CommandId =
   // 调试播放
   | "debug.stepInto"
@@ -31,8 +29,6 @@ export type CommandId =
   | "ui.toggleBookmarks"
   | "ui.toggleCondList"
   | "ui.toggleCallTree";
-
-// ── 注册表（模块级单例，非 React 状态，不触发渲染）──────────────────────────
 
 const _registry = new Map<CommandId, () => void>();
 

@@ -7,12 +7,14 @@ import {
   formatUnits, parseUnits,
   createPublicClient, http,
 } from "viem";
-import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
-import { X, Pin, PinOff } from "lucide-react";
+import { BottomSheetShell } from "@/components/ui/bottom-sheet-shell";
+import { SheetClose } from "@/components/ui/sheet";
+import { X, Pin, PinOff, Wrench } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useDebugStore } from "@/store/debugStore";
+import { useDrawerActions } from "@/hooks/useDrawerActions";
 import { getSelectedRpc } from "@/lib/rpcConfig";
 
 type Tool = "conv" | "keccak256" | "4byte" | "checksum" | "abi" | "slot";
@@ -42,8 +44,6 @@ function Err({ msg }: { msg: string }) {
 function ResultBox({ value }: { value: string }) {
   return <div className="text-xs font-mono px-2 py-1 bg-muted rounded select-all break-all">{value}</div>;
 }
-
-// ── BaseConv ───────────────────────────────────────────────────────────────
 
 function BaseConvTool() {
   // 记录当前正在编辑的进制和原始输入，其他栏位从解析结果派生
@@ -96,8 +96,6 @@ function BaseConvTool() {
   );
 }
 
-// ── GweiConv ───────────────────────────────────────────────────────────────
-
 function GweiTool() {
   const [input, setInput] = useState("");
   const [unit, setUnit] = useState<"wei" | "gwei" | "ether">("gwei");
@@ -140,8 +138,6 @@ function GweiTool() {
   );
 }
 
-// ── Keccak256 ──────────────────────────────────────────────────────────────
-
 function Keccak256Tool() {
   const [input, setInput] = useState("");
   const [asHex, setAsHex] = useState(false);
@@ -183,8 +179,6 @@ function Keccak256Tool() {
   );
 }
 
-// ── 4Byte ──────────────────────────────────────────────────────────────────
-
 function FourByteTool() {
   const [input, setInput] = useState("");
   const [results, setResults] = useState<string[]>([]);
@@ -225,8 +219,6 @@ function FourByteTool() {
   );
 }
 
-// ── Address Checksum ───────────────────────────────────────────────────────
-
 function ChecksumTool() {
   const [input, setInput] = useState("");
   let result = "", err = "";
@@ -251,8 +243,6 @@ function ChecksumTool() {
     </div>
   );
 }
-
-// ── ABI Decoder ────────────────────────────────────────────────────────────
 
 function AbiTool() {
   const [sig, setSig] = useState("");
@@ -296,8 +286,6 @@ function AbiTool() {
     </div>
   );
 }
-
-// ── Storage Slot Read (getStorageAt) ───────────────────────────────────────
 
 function SlotTool() {
   const [kind, setKind] = useState<"plain" | "mapping" | "array">("mapping");
@@ -405,8 +393,6 @@ function SlotTool() {
   );
 }
 
-// ── Timestamp ──────────────────────────────────────────────────────────────
-
 function TimestampTool() {
   const [tsInput, setTsInput] = useState("");
   const [tz, setTz] = useState<"local" | "utc">("local");
@@ -477,33 +463,57 @@ function TimestampTool() {
   );
 }
 
-// ── Drawer ─────────────────────────────────────────────────────────────────
-
 export function UtilitiesDrawer() {
   const isOpen = useDebugStore((s) => s.isUtilitiesOpen);
   const [activeTool, setActiveTool] = useState<Tool>("conv");
   const [pinned, setPinned] = useState(false);
-  const close = () => useDebugStore.getState().sync({ isUtilitiesOpen: false });
+  const { closeUtilities: close } = useDrawerActions();
 
   return (
-    <Sheet open={isOpen} onOpenChange={(o) => { if (!o && !pinned) close(); }}>
-      <SheetContent side="bottom" className="flex flex-col p-0 gap-0 [&>button:first-child]:hidden" style={{ height: "320px" }}>
-        <SheetTitle className="sr-only">Utilities</SheetTitle>
-        {/* Tab bar */}
-        <div className="flex items-center gap-1 px-2 pt-1.5 pb-1 flex-shrink-0 border-b bg-muted/60 overflow-x-auto scrollbar-hidden">
-          {TOOLS.map(({ id, label }) => (
-            <button key={id} onClick={() => setActiveTool(id)}
-              className={`h-6 px-2.5 text-[11px] rounded font-medium transition-colors shrink-0 ${
-                activeTool === id ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground hover:bg-muted/70"
-              }`}>{label}</button>
-          ))}
-          <div className="ml-auto flex items-center gap-1 shrink-0 -mt-2">
-            <button onClick={() => setPinned((p) => !p)} className={`flex items-center justify-center opacity-50 hover:opacity-100 transition-opacity ${pinned ? "opacity-100 text-primary" : ""}`}>
-              {pinned ? <Pin className="h-3 w-3" /> : <PinOff className="h-3 w-3" />}
-            </button>
-            <button onClick={close} className="flex items-center justify-center opacity-50 hover:opacity-100 transition-opacity">
+    <BottomSheetShell
+      open={isOpen}
+      onOpenChange={(o) => { if (!o && !pinned) close(); }}
+      sheetTitle="Utilities"
+      defaultHeightPx={320}
+      minHeightPx={200}
+    >
+        {/* Header + tabs — 与 Call Tree / Event Logs 同一套尺寸（11px、h-5 控件、h-3 图标） */}
+        <div className="flex flex-nowrap items-center gap-x-1.5 border-b border-border bg-muted/60 px-2 py-1 text-[11px] shrink-0">
+          <div className="flex shrink-0 items-center gap-1.5">
+            <Wrench className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden />
+            <span className="shrink-0 font-semibold tracking-wide text-foreground">Utilities</span>
+          </div>
+          <div className="flex min-h-5 min-w-0 flex-1 items-center gap-1 overflow-x-auto px-0.5 py-px scrollbar-hidden">
+            {TOOLS.map(({ id, label }) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setActiveTool(id)}
+                className={`inline-flex h-5 shrink-0 items-center justify-center rounded px-2 text-[11px] font-medium leading-tight transition-colors ${
+                  activeTool === id
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-muted text-muted-foreground hover:bg-muted/80"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <div className="flex shrink-0 items-center">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className={`h-5 w-5 shrink-0 rounded-md p-0 [&_svg]:size-3 ${pinned ? "text-primary" : "text-muted-foreground"}`}
+              title={pinned ? "Unpin drawer" : "Pin drawer (ignore click-outside close)"}
+              onClick={() => setPinned((p) => !p)}
+            >
+              {pinned ? <Pin /> : <PinOff />}
+            </Button>
+            <SheetClose className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm p-0 opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none data-[state=open]:bg-secondary">
               <X className="h-3 w-3" />
-            </button>
+              <span className="sr-only">Close</span>
+            </SheetClose>
           </div>
         </div>
         {/* Content */}
@@ -522,7 +532,6 @@ export function UtilitiesDrawer() {
             {activeTool === "slot"      && <SlotTool />}
           </div>
         )}
-      </SheetContent>
-    </Sheet>
+    </BottomSheetShell>
   );
 }

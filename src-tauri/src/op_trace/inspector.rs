@@ -31,6 +31,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use super::debug_session::{DebugSession, FrameRecord, StorageChangeRecord, TraceStep};
+use super::fork::StatePatch;
 use super::message_encoder::MessageEncoder;
 use super::shadow::ShadowState;
 use super::AlloyCacheDB;
@@ -88,6 +89,13 @@ pub(crate) struct Cheatcodes<BlockT, TxT, CfgT> {
     shadow: ShadowState,
     shadow_temp_dir: PathBuf,
     shadow_enabled: bool,
+    /// patch 命中日志开关（默认关闭，避免高频刷屏）
+    patch_log_enabled: bool,
+    patches: Vec<StatePatch>,
+    next_patch_idx: usize,
+    global_step: usize,
+    /// 当前执行的第几笔交易（0-based）；单 tx 为 0
+    transaction_id: u32,
 }
 
 impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT> {
@@ -114,7 +122,24 @@ impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT> {
             shadow: ShadowState::with_temp_dir(shadow_temp_dir.clone()),
             shadow_temp_dir,
             shadow_enabled,
+            patch_log_enabled: std::env::var("OPTRACE_PATCH_LOG")
+                .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "on" | "ON"))
+                .unwrap_or(false),
+            patches: Vec::new(),
+            next_patch_idx: 0,
+            global_step: 0,
+            transaction_id: 0,
         }
+    }
+
+    /// 多笔顺序执行时，在每笔开始前设置（单 tx 无需调用）
+    pub(crate) fn set_transaction_id(&mut self, id: u32) {
+        self.transaction_id = id;
+    }
+
+    /// 多笔调试：每笔交易执行前调用，重置帧计数器，使 frame_id 在每笔内从 1 起递增。
+    pub(crate) fn reset_frame_stack_for_new_transaction(&mut self) {
+        self.frame_manager.reset();
     }
 
     pub(crate) fn flush_steps(&mut self) {
@@ -125,8 +150,8 @@ impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT> {
         self.verify_memory = enable;
     }
 
-    pub(crate) fn send_finished(&self) {
-        self.encoder.send_finished();
+    pub(crate) fn send_finished(&self, tx_boundaries: Option<&[u32]>) {
+        self.encoder.send_finished(tx_boundaries);
     }
 
     /// 取出 ShadowState 用于存入 DebugSession
@@ -141,6 +166,78 @@ impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT> {
         self.encoder.send_balance_changes(json);
     }
 
+    pub(crate) fn set_patches(&mut self, mut patches: Vec<StatePatch>) {
+        patches.sort_by_key(|p| p.step_index);
+        if self.patch_log_enabled {
+            println!("[PatchTracer] set {} patches", patches.len());
+        }
+        self.patches = patches;
+        self.next_patch_idx = 0;
+        self.global_step = 0;
+        self.transaction_id = 0;
+    }
+
+    fn apply_patches_for_current_step(
+        &mut self,
+        interp: &mut revm::interpreter::Interpreter<EthInterpreter>,
+    ) {
+        while self.next_patch_idx < self.patches.len()
+            && self.patches[self.next_patch_idx].step_index == self.global_step
+        {
+            let patch = &self.patches[self.next_patch_idx];
+            let opcode = interp.bytecode.opcode();
+            let op = OpCode::new(opcode).unwrap();
+            if self.patch_log_enabled {
+                println!(
+                    "[PatchTracer] ▶ patch hit: global_step={} step_index={} stack_patches={} mem_patches={} opcode={:?}",
+                    self.global_step,
+                    patch.step_index,
+                    patch.stack_patches.len(),
+                    patch.memory_patches.len(),
+                    op.as_str(),
+                );
+            }
+
+            for (pos, hex_val) in &patch.stack_patches {
+                let value =
+                    U256::from_str_radix(hex_val.trim_start_matches("0x"), 16).unwrap_or_default();
+                let data = interp.stack.data_mut();
+                let stack_len = data.len();
+                let idx = stack_len.saturating_sub(1).saturating_sub(*pos);
+                if idx < stack_len {
+                    data[idx] = value;
+                }
+            }
+
+            for (offset, hex_data) in &patch.memory_patches {
+                let bytes: Vec<u8> = hex_decode(hex_data);
+                if !bytes.is_empty() {
+                    let needed = offset + bytes.len();
+                    let aligned = needed.next_multiple_of(32);
+                    if interp.memory.len() < aligned {
+                        interp.memory.resize(aligned);
+                    }
+                    interp.memory.set(*offset, &bytes);
+                }
+            }
+
+            self.next_patch_idx += 1;
+        }
+    }
+
+}
+
+fn hex_decode(s: &str) -> Vec<u8> {
+    let s = s.trim_start_matches("0x");
+    let mut out = Vec::with_capacity(s.len() / 2);
+    let mut i = 0usize;
+    while i + 1 < s.len() {
+        if let Ok(v) = u8::from_str_radix(&s[i..i + 2], 16) {
+            out.push(v);
+        }
+        i += 2;
+    }
+    out
 }
 
 impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT>
@@ -155,7 +252,7 @@ where
         let actual_size = interp.memory.len();
         let actual_mem = interp.memory.slice(0..actual_size).to_vec();
         let session = self.debug_session.lock().unwrap();
-        let rebuilt_mem = session.compute_memory_at_step(ctx_id, frame_step);
+        let rebuilt_mem = session.compute_memory_at_step(self.transaction_id, ctx_id, frame_step);
         if actual_mem != rebuilt_mem {
             eprintln!(
                     "[MEMORY MISMATCH] ctx_id={} current_step={} pc={} opcode=0x{:02x} actual_len={} rebuilt_len={}",
@@ -186,7 +283,7 @@ where
 
     fn send_frame_update_address(&self, address: Address) {
         self.encoder
-            .send_frame_update_address(self.frame_manager.current_id(), address);
+            .send_frame_update_address(self.transaction_id, self.frame_manager.current_id(), address);
     }
 
     fn send_storage_change(
@@ -205,6 +302,7 @@ where
             is_read,
             frame_id,
             step_index,
+            self.transaction_id,
             address,
             key,
             old_value,
@@ -215,7 +313,8 @@ where
     fn send_frame_logs(&self, log: &Log) {
         let ctx_id = self.frame_manager.current_id();
         let log_step_index = self.log_tracer.get_log_step_index();
-        self.encoder.send_logs(ctx_id, log_step_index, log);
+        self.encoder
+            .send_logs(ctx_id, log_step_index, self.transaction_id, log);
     }
 
     /// 扫描 journal 中新增的条目，发送 Storage / TransientStorage 变迁消息。
@@ -250,6 +349,7 @@ where
                     );
                     new_changes.push(StorageTracer::create_change_record(
                         step_idx,
+                        self.transaction_id,
                         frame_id,
                         false,
                         false,
@@ -276,6 +376,7 @@ where
                     );
                     new_changes.push(StorageTracer::create_change_record(
                         step_idx,
+                        self.transaction_id,
                         frame_id,
                         true,
                         false,
@@ -328,6 +429,7 @@ where
                 .unwrap()
                 .push_storage_change(StorageTracer::create_change_record(
                     step_idx,
+                    self.transaction_id,
                     frame_id,
                     is_transient,
                     true,
@@ -342,9 +444,21 @@ where
     fn update_frame_bytecode(&mut self, depth: u16, _context_id: u16, bytecode: &Bytes) {
         // if self.bytecode_tracer.has_bytecode_changed(bytecode) {
         //     self.bytecode_tracer.update_bytecode_hash(bytecode);
-        self.encoder
-            .send_contract_source(depth, self.frame_manager.current_id(), bytecode);
+        self.encoder.send_contract_source(
+            depth,
+            self.transaction_id,
+            self.frame_manager.current_id(),
+            bytecode,
+        );
         // }
+
+        // 同时保存到 DebugSession，供 CFG 后端构建使用
+        {
+            let ctx_id = self.frame_manager.current_id();
+            let key = (self.transaction_id, ctx_id);
+            let mut session = self.debug_session.lock().unwrap();
+            session.frame_bytecodes.entry(key).or_insert_with(|| bytecode.to_vec());
+        }
     }
 }
 
@@ -365,6 +479,9 @@ where
         interp: &mut revm::interpreter::Interpreter<EthInterpreter>,
         context: &mut Context<BlockT, TxT, CfgT, AlloyCacheDB, OpTraceJournal<AlloyCacheDB>>,
     ) {
+        // 时序约束：先应用 patch，再读取/记录 step 与 shadow。
+        // 这样 shadow 看到的是“注入后、真实参与执行”的 EVM 数据。
+        self.apply_patches_for_current_step(interp);
         let opcode = interp.bytecode.opcode();
         let op = OpCode::new(opcode).unwrap();
 
@@ -382,6 +499,7 @@ where
 
         let frame_step_count = self.frame_manager.current_step_count();
         self.encoder.pack_step(
+            self.transaction_id,
             self.step_info.pc as u64,
             opcode,
             self.frame_manager.current_id(),
@@ -397,6 +515,7 @@ where
         {
             let mut session = self.debug_session.lock().unwrap();
             session.push_step(TraceStep {
+                transaction_id: self.transaction_id,
                 context_id: ctx_id,
                 frame_step,
                 pc: self.step_info.pc as u32,
@@ -411,7 +530,7 @@ where
             if frame_step % 50 == 0 {
                 let size = interp.memory.len();
                 let data = interp.memory.slice(0..size).to_vec();
-                session.push_snapshot(ctx_id, frame_step, data);
+                session.push_snapshot(self.transaction_id, ctx_id, frame_step, data);
             }
         }
 
@@ -429,10 +548,12 @@ where
                 interp.stack.data(),
                 self.frame_manager.current_target(),
                 self.frame_manager.current_id(),
+                self.transaction_id,
             );
         }
 
         self.step_info.step_count += 1;
+        self.global_step += 1;
     }
 
     fn step_end(
@@ -469,6 +590,7 @@ where
         if let Some(ret_info) = self.memory_tracer.dispatch_update(
             self.step_info.opcode,
             interp,
+            self.transaction_id,
             self.frame_manager.current_id(),
             self.frame_manager.current_step_count(),
             &self.debug_session,
@@ -486,6 +608,7 @@ where
                     let parent_ctx = self.frame_manager.parent_id();
                     let parent_step = self.frame_manager.parent_step_count() as u32;
                     self.debug_session.lock().unwrap().push_patch(
+                        self.transaction_id,
                         parent_ctx,
                         parent_step,
                         ret_offset as u32,
@@ -529,6 +652,7 @@ where
         let ret_memory_offset = inputs.return_memory_offset.start;
         let ret_memory_size = inputs.return_memory_offset.len();
         self.frame_manager.push_frame(FrameInfo {
+            transaction_id: self.transaction_id,
             parent_id: self.frame_manager.current_id(),
             depth: context.journaled_state.depth() as u16,
             frame_id,
@@ -562,6 +686,7 @@ where
             .lock()
             .unwrap()
             .push_frame_record(FrameRecord {
+                transaction_id: self.transaction_id,
                 frame_id: self.frame_manager.current_id(),
                 parent_id: self.frame_manager.parent_id(),
                 depth: self.frame_manager.current_depth(),
@@ -601,6 +726,7 @@ where
         let frame_step_count = self.frame_manager.current_step_count();
 
         self.debug_session.lock().unwrap().finalize_frame(
+            self.transaction_id,
             frame_id,
             gas_used,
             success,
@@ -623,6 +749,7 @@ where
                 let parent_ctx = self.frame_manager.parent_id();
                 let parent_step = self.frame_manager.parent_step_count() as u32;
                 self.debug_session.lock().unwrap().push_patch(
+                    self.transaction_id,
                     parent_ctx,
                     parent_step,
                     ret_mem_start as u32,
@@ -640,7 +767,7 @@ where
             self.shadow.pop_frame(ret_mem_offset, ret_mem_len, output_len_for_shadow);
         }
         self.encoder
-            .send_frame_exit(frame_id, result, success, gas_used, &output);
+            .send_frame_exit(self.transaction_id, frame_id, result, success, gas_used, &output);
         self.frame_manager.pop_frame();
     }
 
@@ -657,6 +784,7 @@ where
             .info
             .nonce;
         self.frame_manager.push_frame(FrameInfo {
+            transaction_id: self.transaction_id,
             parent_id: self.frame_manager.current_id(),
             depth: context.journaled_state.depth() as u16,
             frame_id,
@@ -686,6 +814,7 @@ where
             .lock()
             .unwrap()
             .push_frame_record(FrameRecord {
+                transaction_id: self.transaction_id,
                 frame_id: self.frame_manager.current_id(),
                 parent_id: self.frame_manager.parent_id(),
                 depth: self.frame_manager.current_depth(),
@@ -727,6 +856,7 @@ where
         let frame_step_count = self.frame_manager.current_step_count();
 
         self.debug_session.lock().unwrap().finalize_frame(
+            self.transaction_id,
             frame_id,
             gas_used,
             success,
@@ -741,7 +871,7 @@ where
             self.shadow.pop_frame(0, 0, output.len());
         }
         self.encoder
-            .send_frame_exit(frame_id, result, success, gas_used, &output);
+            .send_frame_exit(self.transaction_id, frame_id, result, success, gas_used, &output);
         self.frame_manager.pop_frame();
     }
 
@@ -773,7 +903,12 @@ where
             info.selfdestruct_transferred_value = Some(value);
         }
         // 通过 encoder 发送 selfdestruct 事件，附在 FrameExit 之前
-        self.encoder
-            .send_selfdestruct(self.frame_manager.current_id(), contract, target, value);
+        self.encoder.send_selfdestruct(
+            self.transaction_id,
+            self.frame_manager.current_id(),
+            contract,
+            target,
+            value,
+        );
     }
 }

@@ -1,6 +1,7 @@
 import { useCallback } from "react";
 import { load } from "@tauri-apps/plugin-store";
 import { useDebugStore } from "@/store/debugStore";
+import { getWindowMode } from "@/lib/windowMode";
 
 /**
  * 断点管理逻辑：opcode 断点 + PC 断点
@@ -15,6 +16,7 @@ export function useBreakpoints(
   const handleBreakOpcodesChange = useCallback((opcodes: Set<number>) => {
     breakOpcodesRef.current = opcodes;
     storeSync({ breakOpcodes: opcodes });
+    if (getWindowMode().readonly) return;
     load("config.json", { autoSave: true, defaults: {} }).then(store => {
       store.set("breakOpcodes", Array.from(opcodes));
     });

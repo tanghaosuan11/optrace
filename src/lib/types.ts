@@ -4,9 +4,7 @@
  */
 
 import type { Opcode } from "./opcodes";
-import type { StepData } from "./stepPlayer";
-
-// ── 枚举 ──────────────────────────────────────────────────────
+import type { ParsedStepBatchResult, StepData } from "./stepPlayer";
 
 export enum MsgType {
     StepBatch = 1,
@@ -58,14 +56,14 @@ export enum InstructionResult {
     FatalExternalError = 0x36,
 }
 
-// ── 数据接口 ──────────────────────────────────────────────────
-
 export interface LogEntry {
     address: string;
     topics: string[];
     data: string;
     stepIndex: number;
     contextId: number;
+    /** 多笔调试：全局 trace 中该步所属交易下标（0 起，与后端一致）；单笔或未附带时可缺省 */
+    transactionId?: number;
 }
 
 export interface MemoryPatch {
@@ -83,6 +81,7 @@ export interface ReturnDataEntry {
     stepIndex: number;
     contextId: number;
     data: string;
+    transactionId?: number;
 }
 
 export interface StorageChangeEntry {
@@ -94,6 +93,8 @@ export interface StorageChangeEntry {
     key: string;
     hadValue: string;
     newValue: string;
+    /** 多笔调试：交易下标（0 起）；旧包体或未附带时可缺省 */
+    transactionId?: number;
 }
 
 export interface StateDiff {
@@ -110,16 +111,18 @@ interface BalanceTokenChange {
 }
 
 export interface AddressBalance {
+    /** 多笔调试：该余额变化所属交易下标（0 起）；单笔可缺省 */
+    transactionId?: number;
     address: string;
     eth: string | null;   // "+xxx" | "-xxx" | null
     tokens: BalanceTokenChange[];
 }
 
-// ── CallFrame ─────────────────────────────────────────────────
-
 export interface CallFrame {
     id: string;
     contextId: number;
+    /** 多笔调试：交易下标（0 起）；单笔缺省为 0 */
+    transactionId?: number;
     parentId?: number;
     depth: number;
     callType?: "call" | "staticcall" | "delegatecall" | "create" | "create2";
@@ -150,14 +153,14 @@ export interface CallFrame {
     selfdestructValue?: string;
 }
 
-// ── Call Tree ─────────────────────────────────────────────────
-
 export type CallTreeNodeType = 'frame' | 'sload' | 'sstore' | 'tload' | 'tstore' | 'log';
 
 export interface CallTreeNode {
     id: number;
     type: CallTreeNodeType;
     stepIndex: number;
+    /** 多笔调试：与 contextId 共同区分一帧；缺省 0 */
+    transactionId?: number;
     contextId: number;
     depth: number;
     callType?: string;
@@ -179,13 +182,39 @@ export interface CallTreeNode {
     selfdestructValue?: string;
 }
 
-// ── MessageHandler 上下文 ─────────────────────────────────────
+export interface MessageRuntimeState {
+    /** key = `${transactionId}:${contextId}` */
+    pendingFrameEnters: Map<string, Record<string, unknown>>;
+    /** key = `${transactionId}:${contextId}` */
+    frameByCtx: Map<string, CallFrame>;
+    /** 每个 scope 在全局 trace 中首次出现的步下标 — 避免 ContractSource 时对 allSteps findIndex。 */
+    firstStepIndexByScope: Map<string, number>;
+    disasmCache: Map<string, Opcode[]>;
+    callFramesFlushTimer: ReturnType<typeof setTimeout> | null;
+    debugStartPerfMs: number | null;
+    finishedPerfLogged: boolean;
+    perfStreamLastLogMs: number;
+    perfStepBatchCount: number;
+    perfStepParseMs: number;
+    perfStepIndexMs: number;
+    perfContractSourceCount: number;
+    perfContractDisasmMs: number;
+    perfContractHexMs: number;
+    stepBatchWorker: Worker | null;
+    stepBatchRequestSeq: number;
+    stepBatchNextResultSeq: number;
+    stepBatchPendingCount: number;
+    stepBatchPendingResults: Map<number, ParsedStepBatchResult>;
+    finishedDeferred: boolean;
+    startDebugInFlight: boolean;
+}
 
 export interface MessageHandlerContext {
     allStepsRef: React.RefObject<StepData[]>;
     callFramesRef: React.RefObject<CallFrame[]>;
     currentStepIndexRef: React.RefObject<number>;
-    stepIndexByContext: React.RefObject<Map<number, number[]>>;
+    /** key = `${transactionId}:${contextId}` */
+    stepIndexByContext: React.RefObject<Map<string, number[]>>;
     opcodeIndex: React.RefObject<Map<number, number[]>>;
     setStepCount: (count: number) => void;
     setCallFrames: React.Dispatch<React.SetStateAction<CallFrame[]>>;
@@ -193,4 +222,5 @@ export interface MessageHandlerContext {
     setIsDebugging: (isDebugging: boolean) => void;
     applyStep: (index: number) => void;
     callTreeRef: React.RefObject<CallTreeNode[]>;
+    runtime: MessageRuntimeState;
 }

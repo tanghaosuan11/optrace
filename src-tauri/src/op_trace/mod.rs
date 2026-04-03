@@ -15,6 +15,8 @@ mod frame_manager;
 mod tracer;
 pub mod shadow;
 pub mod fork;
+pub mod cfg_builder;
+pub mod symbolic;
 
 pub use debug_session::DebugSessionState;
 pub use evm_runner::op_trace;
@@ -26,6 +28,7 @@ pub(crate) type AlloyCacheDB = CacheDB<WrapDatabaseAsync<AlloyDB<Ethereum, DynPr
 /// 每个 frame 在 seek 目标时刻的状态
 #[derive(Serialize)]
 pub struct FrameState {
+    pub transaction_id: u32,
     pub context_id: u16,
     pub pc: u32,
     pub gas_cost: u64,
@@ -35,6 +38,7 @@ pub struct FrameState {
 
 #[derive(Serialize)]
 pub struct SeekResult {
+    pub active_transaction_id: u32,
     pub active_context_id: u16,
     pub frames: Vec<FrameState>,
 }
@@ -49,11 +53,12 @@ pub fn seek_to_impl(
     }
 
     let target_step = &session.trace[global_index];
+    let active_transaction_id = target_step.transaction_id;
     let active_context_id = target_step.context_id;
 
     let mut frames = Vec::new();
 
-    for (ctx_id, indices) in &session.step_index {
+    for ((tid, ctx_id), indices) in &session.step_index {
         // 二分找 indices 中 <= global_index 的最大值
         let last_global = match indices.binary_search(&global_index) {
             Ok(i) => indices[i],
@@ -64,7 +69,7 @@ pub fn seek_to_impl(
         let step = &session.trace[last_global];
 
         // 计算内存
-        let mem_bytes = session.compute_memory_at_step(*ctx_id, step.frame_step);
+        let mem_bytes = session.compute_memory_at_step(*tid, *ctx_id, step.frame_step);
         let memory = if mem_bytes.is_empty() {
             "0x".to_string()
         } else {
@@ -88,6 +93,7 @@ pub fn seek_to_impl(
         }).collect();
 
         frames.push(FrameState {
+            transaction_id: *tid,
             context_id: *ctx_id,
             pc: step.pc,
             gas_cost: step.gas_cost,
@@ -97,6 +103,7 @@ pub fn seek_to_impl(
     }
 
     Some(SeekResult {
+        active_transaction_id,
         active_context_id,
         frames,
     })
@@ -107,6 +114,7 @@ pub fn seek_to_impl(
 #[derive(Serialize)]
 pub struct StepFullData {
     pub step_index: usize,
+    pub transaction_id: u32,
     pub context_id: u16,
     pub pc: u32,
     pub opcode: u8,
@@ -132,7 +140,8 @@ pub fn range_full_data_impl(
         .map(|i| {
             let step = &session.trace[i];
 
-            let mem_bytes = session.compute_memory_at_step(step.context_id, step.frame_step);
+            let mem_bytes =
+                session.compute_memory_at_step(step.transaction_id, step.context_id, step.frame_step);
             let memory = if mem_bytes.is_empty() {
                 "0x".to_string()
             } else {
@@ -158,6 +167,7 @@ pub fn range_full_data_impl(
 
             StepFullData {
                 step_index: i,
+                transaction_id: step.transaction_id,
                 context_id: step.context_id,
                 pc: step.pc,
                 opcode: step.opcode,

@@ -66,9 +66,12 @@ pub struct AnalysisFilters {
     pub opcodes:    Option<HashSet<u8>>,
     pub contracts:  Option<HashSet<[u8; 20]>>,
     pub targets:    Option<HashSet<[u8; 20]>>,
+    /// 与 [`Self::transaction_id`] 联用：若设置 frames，则 **必须** 同时限定 `transaction_id`（脚本或 invoke 合并后非空）。
     pub frames:     Option<HashSet<u16>>,
     /// 全局步骤下标范围 [from, to]（含两端）
     pub step_range: Option<(usize, usize)>,
+    /// 仅包含指定 `TraceStep::transaction_id` 的步；与 `step_range` 取交集。若设置了 `frames` 则必填。
+    pub transaction_id: Option<u32>,
 }
 
 impl AnalysisFilters {
@@ -83,7 +86,14 @@ impl AnalysisFilters {
         let step_range = raw.step_range.and_then(|v| {
             if v.len() == 2 { Some((v[0], v[1])) } else { None }
         });
-        AnalysisFilters { opcodes, contracts, targets, frames, step_range }
+        AnalysisFilters {
+            opcodes,
+            contracts,
+            targets,
+            frames,
+            step_range,
+            transaction_id: raw.transaction_id,
+        }
     }
 
     fn parse_opcodes(list: Option<Vec<String>>) -> Option<HashSet<u8>> {
@@ -110,6 +120,20 @@ impl AnalysisFilters {
         if list.is_empty() { return None; }
         let set: HashSet<_> = list.iter().filter_map(|s| parse_address(s)).collect();
         if set.is_empty() { None } else { Some(set) }
+    }
+
+    /// `@filter frames` 笔内 frame 号在跨笔时会重复，必须同时限定 `transaction_id`。
+    fn validate_frames_require_transaction_id(&self) -> Result<(), String> {
+        if self.frames.is_none() {
+            return Ok(());
+        }
+        if self.transaction_id.is_some() {
+            return Ok(());
+        }
+        Err(
+            "使用 @filter frames 时必须限定 transaction_id：在脚本中增加 // @filter transaction_id: N（N 为 0-based，单 tx 会话用 0），或在分析抽屉中选择「仅 Tx k」注入该笔。"
+                .into(),
+        )
     }
 }
 
@@ -177,6 +201,24 @@ fn register_query_fns(
         })?)?;
     }
 
+    // backwardSliceRaw(global_step) → JSON number[] — 数据流祖先步骤（无 Shadow 图时返回 []）
+    {
+        let p = session_ptr;
+        g.set(
+            "backwardSliceRaw",
+            Function::new(ctx.clone(), move |global_step: u32| -> String {
+                let sess = unsafe { &*(p as *const DebugSession) };
+                match &sess.shadow {
+                    Some(shadow) => {
+                        let steps = shadow.backward_slice(global_step);
+                        serde_json::to_string(&steps).unwrap_or_else(|_| "[]".to_string())
+                    }
+                    None => "[]".to_string(),
+                }
+            })?,
+        )?;
+    }
+
     // getStepRaw(i) → JSON 字符串，按下标取单步数据
     {
         let p = session_ptr;
@@ -189,6 +231,7 @@ fn register_query_fns(
             serde_json::json!({
                 "stepIndex": idx as u32,
                 "index":     idx as u32,
+                "transactionId": step.transaction_id,
                 "contextId": step.context_id,
                 "frameStep": step.frame_step,
                 "pc":        step.pc,
@@ -236,7 +279,11 @@ fn register_query_fns(
         g.set("countByFrameRaw", Function::new(ctx.clone(), move || -> String {
             let sess = unsafe { &*(p as *const DebugSession) };
             let mut entries: Vec<_> = sess.step_index.iter()
-                .map(|(&cid, indices)| serde_json::json!({"contextId": cid, "stepCount": indices.len()}))
+                .map(|(&(tid, cid), indices)| serde_json::json!({
+                    "transactionId": tid,
+                    "contextId": cid,
+                    "stepCount": indices.len(),
+                }))
                 .collect();
             entries.sort_by(|a, b| {
                 b["stepCount"].as_u64().unwrap_or(0).cmp(&a["stepCount"].as_u64().unwrap_or(0))
@@ -287,28 +334,35 @@ fn register_query_fns(
                     key_hex == normalized
                 })
                 .map(|c| serde_json::json!({
-                    "stepIndex":   c.step_index as u32,
-                    "frameId":     c.frame_id,
-                    "isTransient": c.is_transient,
-                    "contract":    bytes_to_hex(c.address.as_ref()),
-                    "key":         u256_to_hex(&c.key),
-                    "oldValue":    u256_to_hex(&c.old_value),
-                    "newValue":    u256_to_hex(&c.new_value),
+                    "stepIndex":      c.step_index as u32,
+                    "transactionId":  c.transaction_id,
+                    "frameId":        c.frame_id,
+                    "isTransient":    c.is_transient,
+                    "contract":       bytes_to_hex(c.address.as_ref()),
+                    "key":            u256_to_hex(&c.key),
+                    "oldValue":       u256_to_hex(&c.old_value),
+                    "newValue":       u256_to_hex(&c.new_value),
                 }))
                 .collect();
             serde_json::Value::Array(results).to_string()
         })?)?;
     }
 
-    // getFrameInfoRaw(frameId) → JSON 字符串
-    // 按 frame id 取调用帧元数据（caller/kind/gas 等），找不到返回 "null"
+    // getFrameInfoRaw(frameId, transactionId?) → JSON 字符串
+    // 按 (transaction_id, frame_id) 取调用帧元数据；transactionId 缺省为 0（单 tx）
     {
         let p = session_ptr;
-        g.set("getFrameInfoRaw", Function::new(ctx.clone(), move |frame_id: u32| -> String {
+        g.set("getFrameInfoRaw", Function::new(ctx.clone(), move |frame_id: u32, transaction_id: Option<i64>| -> String {
             let sess = unsafe { &*(p as *const DebugSession) };
-            match sess.frame_map.get(&(frame_id as u16)) {
+            let tid = match transaction_id {
+                None => 0u32,
+                Some(x) if x < 0 => 0u32,
+                Some(x) => x as u32,
+            };
+            match sess.frame_map.get(&(tid, frame_id as u16)) {
                 None => "null".into(),
                 Some(f) => serde_json::json!({
+                    "transactionId": f.transaction_id,
                     "frameId":   f.frame_id,
                     "parentId":  f.parent_id,
                     "depth":     f.depth,
@@ -348,14 +402,15 @@ fn register_query_fns(
                     true
                 })
                 .map(|c| serde_json::json!({
-                    "stepIndex":   c.step_index as u32,
-                    "frameId":     c.frame_id,
-                    "isTransient": c.is_transient,
-                    "isRead":      c.is_read,
-                    "contract":    bytes_to_hex(c.address.as_ref()),
-                    "key":         u256_to_hex(&c.key),
-                    "oldValue":    u256_to_hex(&c.old_value),
-                    "newValue":    u256_to_hex(&c.new_value),
+                    "stepIndex":      c.step_index as u32,
+                    "transactionId":  c.transaction_id,
+                    "frameId":        c.frame_id,
+                    "isTransient":    c.is_transient,
+                    "isRead":         c.is_read,
+                    "contract":       bytes_to_hex(c.address.as_ref()),
+                    "key":            u256_to_hex(&c.key),
+                    "oldValue":       u256_to_hex(&c.old_value),
+                    "newValue":       u256_to_hex(&c.new_value),
                 }))
                 .collect();
             serde_json::Value::Array(results).to_string()
@@ -403,13 +458,27 @@ fn register_query_fns(
     Ok(())
 }
 
-fn inject_trace(ctx: &Ctx<'_>, session: &DebugSession, filters: &AnalysisFilters) -> rquickjs::Result<()> {
-    let arr = rquickjs::Array::new(ctx.clone())?;
+fn inject_trace(
+    ctx: &Ctx<'_>,
+    session: &DebugSession,
+    filters: &AnalysisFilters,
+    cancelled: &AtomicBool,
+) -> Result<(), String> {
+    let arr = rquickjs::Array::new(ctx.clone()).map_err(|e| format!("create array: {e}"))?;
     let mut out_idx: u32 = 0;
 
     for (i, step) in session.trace.iter().enumerate() {
+        // 在大 trace 注入阶段高频检查取消，改善 Stop 响应速度
+        if (i & 1023) == 0 && cancelled.load(Ordering::Relaxed) {
+            return Err("Cancelled during trace injection".into());
+        }
         if let Some((from, to)) = filters.step_range {
             if i < from || i > to { continue; }
+        }
+        if let Some(tid) = filters.transaction_id {
+            if step.transaction_id != tid {
+                continue;
+            }
         }
         if let Some(ref f) = filters.opcodes {
             if !f.contains(&step.opcode) { continue; }
@@ -426,41 +495,42 @@ fn inject_trace(ctx: &Ctx<'_>, session: &DebugSession, filters: &AnalysisFilters
             if !f.contains(addr) { continue; }
         }
 
-        let obj = Object::new(ctx.clone())?;
-        obj.set("stepIndex", i as u32)?;   // 全局步骤下标（可点击跳转）
-        obj.set("index", i as u32)?;        // 兼容旧脚本
-        obj.set("contextId", step.context_id as u32)?;
-        obj.set("frameStep", step.frame_step)?;
-        obj.set("pc", step.pc)?;
+        let obj = Object::new(ctx.clone()).map_err(|e| format!("create obj: {e}"))?;
+        obj.set("stepIndex", i as u32).map_err(|e| format!("set stepIndex: {e}"))?;   // 全局步骤下标（可点击跳转）
+        obj.set("index", i as u32).map_err(|e| format!("set index: {e}"))?;        // 兼容旧脚本
+        obj.set("transactionId", step.transaction_id).map_err(|e| format!("set transactionId: {e}"))?;
+        obj.set("contextId", step.context_id as u32).map_err(|e| format!("set contextId: {e}"))?;
+        obj.set("frameStep", step.frame_step).map_err(|e| format!("set frameStep: {e}"))?;
+        obj.set("pc", step.pc).map_err(|e| format!("set pc: {e}"))?;
         let opcode_name = revm::bytecode::opcode::OpCode::new(step.opcode)
             .map(|op| op.as_str())
             .unwrap_or("UNKNOWN");
-        obj.set("opcode", opcode_name)?;
-        obj.set("opcodeNum", step.opcode as u32)?;
+        obj.set("opcode", opcode_name).map_err(|e| format!("set opcode: {e}"))?;
+        obj.set("opcodeNum", step.opcode as u32).map_err(|e| format!("set opcodeNum: {e}"))?;
         let mut hex_buf = [0u8; 4];
         hex_buf[0] = b'0';
         hex_buf[1] = b'x';
         hex_buf[2] = HEX[(step.opcode >> 4) as usize];
         hex_buf[3] = HEX[(step.opcode & 0x0f) as usize];
-        obj.set("opcodeHex", unsafe { std::str::from_utf8_unchecked(&hex_buf) })?;
-        obj.set("gasCost", step.gas_cost as f64)?;
-        obj.set("gasRemaining", step.gas_remaining as f64)?;
-        obj.set("contract", bytes_to_hex(step.contract_address.as_ref()))?;
-        obj.set("target",   bytes_to_hex(step.call_target.as_ref()))?;
+        obj.set("opcodeHex", unsafe { std::str::from_utf8_unchecked(&hex_buf) }).map_err(|e| format!("set opcodeHex: {e}"))?;
+        obj.set("gasCost", step.gas_cost as f64).map_err(|e| format!("set gasCost: {e}"))?;
+        obj.set("gasRemaining", step.gas_remaining as f64).map_err(|e| format!("set gasRemaining: {e}"))?;
+        obj.set("contract", bytes_to_hex(step.contract_address.as_ref())).map_err(|e| format!("set contract: {e}"))?;
+        obj.set("target",   bytes_to_hex(step.call_target.as_ref())).map_err(|e| format!("set target: {e}"))?;
 
-        let stack = rquickjs::Array::new(ctx.clone())?;
+        let stack = rquickjs::Array::new(ctx.clone()).map_err(|e| format!("create stack: {e}"))?;
         for (j, v) in step.stack.iter().enumerate() {
-            stack.set(j, u256_to_hex(v))?;
+            stack.set(j, u256_to_hex(v)).map_err(|e| format!("set stack[{j}]: {e}"))?;
         }
-        obj.set("stack", stack)?;
+        obj.set("stack", stack).map_err(|e| format!("set stack: {e}"))?;
 
-        arr.set(out_idx as usize, obj)?;
+        arr.set(out_idx as usize, obj).map_err(|e| format!("push trace[{out_idx}]: {e}"))?;
         out_idx += 1;
     }
 
     let g = ctx.globals();
-    g.set("trace", arr.clone())?;
-    g.set("steps", arr)?;
+    g.set("trace", arr.clone()).map_err(|e| format!("set trace: {e}"))?;
+    g.set("steps", arr).map_err(|e| format!("set steps: {e}"))?;
     Ok(())
 }
 
@@ -470,9 +540,12 @@ pub struct RawFilters {
     pub opcodes:    Option<Vec<String>>,
     pub contracts:  Option<Vec<String>>,
     pub targets:    Option<Vec<String>>,
+    /// 与 `transaction_id` 联用：若提供非空 `frames`，合并后的 filters 必须含 `transaction_id`（见 `AnalysisFilters::validate_frames_require_transaction_id`）。
     pub frames:     Option<Vec<u16>>,
     /// [from, to] 两元素数组，全局步骤下标范围（含两端）
     pub step_range: Option<Vec<usize>>,
+    /// 仅分析该 `transaction_id` 的步；与 `invoke` 顶层 `transactionId` 合并。**使用 `frames` 时必填**。
+    pub transaction_id: Option<u32>,
     /// 懒加载模式：跳过 inject_trace，trace/steps 为空数组，全靠 query API 按需取数据
     pub lazy:       Option<bool>,
 }
@@ -487,6 +560,7 @@ pub fn run_analysis(
 ) -> Result<serde_json::Value, String> {
     let lazy = raw_filters.lazy.unwrap_or(false);
     let filters = AnalysisFilters::from_raw(raw_filters);
+    filters.validate_frames_require_transaction_id()?;
     if cancelled.load(Ordering::Relaxed) {
         return Err("Cancelled before start".into());
     }
@@ -517,7 +591,7 @@ pub fn run_analysis(
             inject_ms = 0.0;
         } else {
             let t1 = std::time::Instant::now();
-            inject_trace(&ctx, session, &filters).map_err(|e| format!("inject: {e}"))?;
+            inject_trace(&ctx, session, &filters, &cancelled).map_err(|e| format!("inject: {e}"))?;
             inject_ms = t1.elapsed().as_secs_f64() * 1000.0;
         }
 
@@ -538,8 +612,11 @@ pub fn run_analysis(
                         return String::new();
                     }
                     let step = &sess.trace[idx];
-                    let mem =
-                        sess.compute_memory_at_step(step.context_id, step.frame_step);
+                    let mem = sess.compute_memory_at_step(
+                        step.transaction_id,
+                        step.context_id,
+                        step.frame_step,
+                    );
                     bytes_to_hex(&mem)
                 })
                 .map_err(|e| format!("getMemory fn: {e}"))?,
@@ -596,8 +673,9 @@ pub fn run_analysis(
             function getSlotHistory(slot) {
                 return JSON.parse(getSlotHistoryRaw(slot));
             }
-            function getFrameInfo(frameId) {
-                var r = getFrameInfoRaw(frameId);
+            function getFrameInfo(frameId, transactionId) {
+                var r = getFrameInfoRaw(frameId,
+                    transactionId !== undefined && transactionId !== null ? transactionId : undefined);
                 return (r === 'null' || !r) ? null : JSON.parse(r);
             }
             function getStorageChanges(addr, from, to) {
@@ -605,6 +683,13 @@ pub fn run_analysis(
                     addr || '',
                     from !== undefined && from !== null ? from : -1,
                     to   !== undefined && to   !== null ? to   : -1));
+            }
+            function backwardSlice(globalStep) {
+                try {
+                    return JSON.parse(backwardSliceRaw(globalStep));
+                } catch (e) {
+                    return [];
+                }
             }
             // saveData(filename, content) → 写入路径字符串，失败抛出异常
             function saveData(filename, content) {

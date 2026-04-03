@@ -1,14 +1,51 @@
 import { useState, useMemo, useEffect, useRef } from "react";
-import { ChevronRight, ChevronDown, Copy, Check } from "lucide-react";
+import { ChevronRight, ChevronDown, Copy, Check, ListTree, PanelTop } from "lucide-react";
 import type { CallTreeNode } from "@/lib/types";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import fourbyteDb from "@/lib/fourbyteDb.json";
 import { getUserFn } from "@/lib/userFourbyteDb";
 import { useDebugStore } from "@/store/debugStore";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useCallTreeAddressLabels, type AddressLabelMap } from "@/hooks/useCallTreeAddressLabels";
-import { useCallTreeFilters } from "@/hooks/useCallTreeFilters";
+import { useCallTreeFilters, type CallTreeFilters } from "@/hooks/useCallTreeFilters";
+import { frameTabId } from "@/lib/frameScope";
+import { useFloatingPanelBodyRoot } from "@/components/floating-panel/FloatingPanelBodyContext";
 
-// Inject / update a <style> tag to highlight all [data-addr="..."] elements globally
+/** 默认展开深度 */
+const CALLTREE_DEFAULT_DEPTH_LIMIT = 3;
+
+const CALLTREE_FILTER_TOGGLES: { label: string; key: keyof CallTreeFilters; title?: string }[] = [
+  { label: "SLOAD", key: "showSload", title: "Show storage load ops" },
+  { label: "SSTORE", key: "showSstore", title: "Show storage store ops" },
+  { label: "TLOAD", key: "showTload", title: "Show transient load ops" },
+  { label: "TSTORE", key: "showTstore", title: "Show transient store ops" },
+  { label: "STATIC", key: "showStaticCall", title: "Show STATICCALL frames" },
+  { label: "GAS", key: "showGas", title: "Show gas used per frame" },
+];
+
+/** 解析 activeTab: `frame-tid-cid` / `frame-cid` */
+function parseActiveFrameTab(tab: string | undefined): { tid: number; cid: number } | null {
+  if (!tab?.startsWith("frame-")) return null;
+  const m = /^frame-(\d+)-(\d+)$/.exec(tab);
+  if (m) return { tid: Number(m[1]), cid: Number(m[2]) };
+  const legacy = /^frame-(\d+)$/.exec(tab);
+  if (legacy) return { tid: 0, cid: Number(legacy[1]) };
+  return null;
+}
+
+function nodeInScope(n: CallTreeNode, scope: { tid: number; cid: number }): boolean {
+  return (n.transactionId ?? 0) === scope.tid && n.contextId === scope.cid;
+}
+
+// 更新全局地址高亮样式
 const STYLE_ID = "calltree-addr-highlight";
 function setGlobalAddrHighlight(addr: string | null) {
   let el = document.getElementById(STYLE_ID) as HTMLStyleElement | null;
@@ -32,9 +69,11 @@ interface CallTreeViewerProps {
   onSeekTo?: (index: number) => void;
   onSelectFrame?: (frameId: string) => void;
   onNavigateTo?: (stepIndex: number, frameId: string) => void;
+  /** 标题栏右侧显示浮动面板按钮 */
+  onOpenInFloating?: () => void;
+  /** 在浮动面板内嵌时隐藏该按钮 */
+  hideFloatingOpenButton?: boolean;
 }
-
-// ── helpers ───────────────────────────────────────────────────────────────────
 
 function fullAddr(addr?: string): string {
   if (!addr || addr === '0x0000000000000000000000000000000000000000') return '—';
@@ -78,6 +117,7 @@ function OpBadge({ type, depth, extra }: { type?: string; depth: number; extra?:
 }
 
 function CalldataPopover({ input }: { input: string }) {
+  const floatingPortalContainer = useFloatingPanelBodyRoot();
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const handleCopy = (e: React.MouseEvent) => {
@@ -105,6 +145,7 @@ function CalldataPopover({ input }: { input: string }) {
         </span>
       </PopoverTrigger>
       <PopoverContent
+        container={floatingPortalContainer ?? undefined}
         side="bottom"
         align="start"
         sideOffset={4}
@@ -129,9 +170,7 @@ function getFnLabel(input?: string, resolvedFns?: Record<string, string>): strin
   return db[selector]?.fn ?? getUserFn(selector) ?? resolvedFns?.[selector] ?? ('0x' + hex.slice(0, 8));
 }
 
-/**
- * 获取地址的显示文本（优先显示标签）
- */
+/** 地址展示文本，优先标签 */
 function getAddrDisplay(addr: string | undefined, addressLabels: AddressLabelMap): {
   display: string;
   hasLabel: boolean;
@@ -144,8 +183,6 @@ function getAddrDisplay(addr: string | undefined, addressLabels: AddressLabelMap
   }
   return { display: fullAddr(addr), hasLabel: false };
 }
-
-// ── node row ──────────────────────────────────────────────────────────────────
 
 interface NodeRowProps {
   node: CallTreeNode;
@@ -165,7 +202,7 @@ interface NodeRowProps {
   addressLabels: AddressLabelMap;
 }
 
-/** Renders the row-number cell + depth guide columns (vertical bars) */
+/** 行号 + 深度导线 */
 function RowPrefix({ rowIndex, depth }: { rowIndex: number | string; depth: number }) {
   return (
     <>
@@ -202,10 +239,11 @@ function NodeRow({ node, rowIndex, isCollapsed, isActive, isActiveEvent, hovered
           isActive ? 'bg-primary/10 hover:bg-primary/15' : 'hover:bg-muted/40'
         }`}
         onClick={() => {
+          const fid = frameTabId(node.transactionId ?? 0, node.contextId);
           if (onNavigateTo) {
-            onNavigateTo(node.stepIndex, `frame-${node.contextId}`);
+            onNavigateTo(node.stepIndex, fid);
           } else {
-            onSelectFrame?.(`frame-${node.contextId}`);
+            onSelectFrame?.(fid);
             onSeekTo?.(node.stepIndex);
           }
         }}
@@ -365,8 +403,6 @@ function NodeRow({ node, rowIndex, isCollapsed, isActive, isActiveEvent, hovered
   );
 }
 
-// ── visible node filter / collapse ────────────────────────────────────────────
-
 function getVisibleNodes(nodes: CallTreeNode[], collapsed: Set<number>): CallTreeNode[] {
   const result: CallTreeNode[] = [];
   let hiddenDepth = Infinity;
@@ -381,19 +417,23 @@ function getVisibleNodes(nodes: CallTreeNode[], collapsed: Set<number>): CallTre
   return result;
 }
 
-// ── main component ────────────────────────────────────────────────────────────
-
-export function CallTreeViewer({ onSeekTo, onSelectFrame, onNavigateTo }: CallTreeViewerProps) {
+export function CallTreeViewer({
+  onSeekTo,
+  onSelectFrame,
+  onNavigateTo,
+  onOpenInFloating,
+  hideFloatingOpenButton = false,
+}: CallTreeViewerProps) {
   const nodes = useDebugStore((s) => s.callTreeNodes);
   const activeTab = useDebugStore((s) => s.activeTab);
   const currentStepIndex = useDebugStore((s) => s.currentStepIndex);
   const txGasUsed = useDebugStore((s) => s.txData?.gasUsed);
   const chainId = useDebugStore((s) => s.currentDebugChainId);
 
-  // 获取地址标签
+  // 地址标签
   const { labels: addressLabels } = useCallTreeAddressLabels(nodes, chainId);
-  
-  // 加载和管理 CallTree 过滤器状态（自动保存到 tauriStore）
+
+  // CallTree 过滤器（持久化）
   const { filters, updateFilter } = useCallTreeFilters();
   
   const [collapsed, setCollapsed] = useState<Set<number>>(new Set());
@@ -401,10 +441,11 @@ export function CallTreeViewer({ onSeekTo, onSelectFrame, onNavigateTo }: CallTr
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerHeight, setContainerHeight] = useState(300);
   const [scrollTop, setScrollTop] = useState(0);
-  const scrollToContextId = useRef<number | null>(null);
+  const scrollToScopeRef = useRef<{ tid: number; cid: number } | null>(null);
 
-  // 远端查询结果由 useFourbyteResolver hook 写入 store，此处直接读取
+  // fourbyte 解析结果
   const resolvedFns = useDebugStore((s) => s.resolvedFnCache);
+  const floatingPortalContainer = useFloatingPanelBodyRoot();
 
   const handleHoverAddr = (addr: string | null) => {
     setHoveredAddr(addr);
@@ -415,10 +456,7 @@ export function CallTreeViewer({ onSeekTo, onSelectFrame, onNavigateTo }: CallTr
     return () => setGlobalAddrHighlight(null);
   }, []);
 
-  const activeContextId = useMemo(() => {
-    const m = activeTab?.match(/^frame-(\d+)$/);
-    return m ? parseInt(m[1]) : null;
-  }, [activeTab]);
+  const activeScope = useMemo(() => parseActiveFrameTab(activeTab), [activeTab]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -442,20 +480,39 @@ export function CallTreeViewer({ onSeekTo, onSelectFrame, onNavigateTo }: CallTr
 
   const visible = useMemo(() => getVisibleNodes(filtered, collapsed), [filtered, collapsed]);
 
-  // In current frame's nodes, find the last non-frame node with stepIndex <= currentStepIndex
+  const maxTreeDepth = useMemo(
+    () => (nodes.length === 0 ? 0 : Math.max(...nodes.map((n) => n.depth))),
+    [nodes],
+  );
+
+  /** `default` 使用默认深度；否则使用指定深度 */
+  const [depthSelection, setDepthSelection] = useState<"default" | number>("default");
+
+  const effectiveDepthLimit =
+    depthSelection === "default" ? CALLTREE_DEFAULT_DEPTH_LIMIT : depthSelection;
+
+  useEffect(() => {
+    if (nodes.length === 0) return;
+    const limit = effectiveDepthLimit;
+    setCollapsed(
+      new Set(nodes.filter((n) => n.type === "frame" && n.depth > limit).map((n) => n.id)),
+    );
+  }, [nodes, maxTreeDepth, effectiveDepthLimit]);
+
+  // 当前 frame 内最近的事件节点
   const activeEventNode = useMemo(() => {
-    if (currentStepIndex < 0 || activeContextId == null) return null;
+    if (currentStepIndex < 0 || activeScope == null) return null;
     let last: CallTreeNode | null = null;
     for (const n of filtered) {
       if (n.type === 'frame') continue;
-      if (n.contextId !== activeContextId) continue;
+      if (!nodeInScope(n, activeScope)) continue;
       if (n.stepIndex > currentStepIndex) break;
       last = n;
     }
     return last;
-  }, [filtered, currentStepIndex, activeContextId]);
+  }, [filtered, currentStepIndex, activeScope]);
 
-  // Scroll to active event node when it changes (only if not already visible)
+  // 活动事件变化时滚动到可见区域
   useEffect(() => {
     if (!activeEventNode) return;
     const idx = visible.findIndex(n => n.id === activeEventNode.id);
@@ -470,16 +527,16 @@ export function CallTreeViewer({ onSeekTo, onSelectFrame, onNavigateTo }: CallTr
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeEventNode]);
 
-  // Expand ancestor frame nodes when active context changes
+  // 切换 active frame 时展开祖先节点
   useEffect(() => {
-    if (activeContextId == null || nodes.length === 0) return;
-    const targetNode = nodes.find(n => n.type === 'frame' && n.contextId === activeContextId);
+    if (activeScope == null || nodes.length === 0) return;
+    const targetNode = nodes.find(n => n.type === 'frame' && nodeInScope(n, activeScope));
     if (!targetNode) return;
-    scrollToContextId.current = activeContextId;
+    scrollToScopeRef.current = { ...activeScope };
     setCollapsed(prev => {
       const stack: { id: number; depth: number }[] = [];
       for (const n of nodes) {
-        if (n.type === 'frame' && n.contextId === activeContextId) break;
+        if (n.type === 'frame' && nodeInScope(n, activeScope)) break;
         if (n.type === 'frame') {
           while (stack.length > 0 && stack[stack.length - 1].depth >= n.depth) stack.pop();
           stack.push({ id: n.id, depth: n.depth });
@@ -492,15 +549,15 @@ export function CallTreeViewer({ onSeekTo, onSelectFrame, onNavigateTo }: CallTr
       }
       return changed ? next : prev;
     });
-  }, [activeContextId, nodes]);
+  }, [activeScope, nodes]);
 
-  // After visible updates (ancestors expanded), scroll to active node
+  // 祖先展开后再滚动到目标节点
   useEffect(() => {
-    const cid = scrollToContextId.current;
-    if (cid == null) return;
-    const idx = visible.findIndex(n => n.type === 'frame' && n.contextId === cid);
+    const scope = scrollToScopeRef.current;
+    if (scope == null) return;
+    const idx = visible.findIndex(n => n.type === 'frame' && nodeInScope(n, scope));
     if (idx === -1) return;
-    scrollToContextId.current = null;
+    scrollToScopeRef.current = null;
     const el = containerRef.current;
     if (!el) return;
     el.scrollTop = Math.max(0, idx * ROW_H - el.clientHeight / 2 + ROW_H / 2);
@@ -527,38 +584,80 @@ export function CallTreeViewer({ onSeekTo, onSelectFrame, onNavigateTo }: CallTr
   }
 
   return (
-    <div className="flex flex-col h-full border rounded-md overflow-hidden bg-background">
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background">
       {/* toolbar */}
-      <div className="flex items-center gap-3 px-2 py-1 border-b bg-muted/90 flex-shrink-0 text-[11px]">
-        <span className="text-muted-foreground font-mono">{visible.length} / {nodes.length} nodes</span>
-        {[
-          { label: 'SLOAD', key: 'showSload' as const, checked: filters.showSload },
-          { label: 'SSTORE', key: 'showSstore' as const, checked: filters.showSstore },
-          { label: 'TLOAD', key: 'showTload' as const, checked: filters.showTload },
-          { label: 'TSTORE', key: 'showTstore' as const, checked: filters.showTstore },
-          { label: 'STATIC', key: 'showStaticCall' as const, checked: filters.showStaticCall },
-          { label: 'GAS', key: 'showGas' as const, checked: filters.showGas },
-        ].map(({ label, key, checked }) => (
-          <label key={label} className="flex items-center gap-1 cursor-pointer select-none text-muted-foreground">
-            <input type="checkbox" checked={checked} onChange={e => updateFilter(key, e.target.checked)} className="h-3 w-3 accent-primary" />
-            {label}
-          </label>
-        ))}
-        <button
-          className="ml-auto text-muted-foreground hover:text-foreground transition-colors"
-          onClick={() => setCollapsed(new Set())}
-        >
-          Expand All
-        </button>
-        <button
-          className="text-muted-foreground hover:text-foreground transition-colors"
-          onClick={() => {
-            const frameIds = new Set(nodes.filter(n => n.type === 'frame').map(n => n.id));
-            setCollapsed(frameIds);
+      <div className="flex min-h-0 flex-nowrap items-center gap-x-1.5 overflow-x-auto border-b border-border bg-muted/60 px-2 py-1 text-[11px] flex-shrink-0">
+        <ListTree className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden />
+        <span className="shrink-0 text-[11px] font-semibold tracking-wide text-foreground">Call Tree</span>
+        <span className="shrink-0 text-[10px] font-medium text-muted-foreground">expand</span>
+        <Select
+          value={depthSelection === "default" ? "default" : String(depthSelection)}
+          onValueChange={(v) => {
+            if (v === "default") {
+              setDepthSelection("default");
+              return;
+            }
+            const N = Number.parseInt(v, 10);
+            if (Number.isNaN(N)) return;
+            setDepthSelection(N);
           }}
         >
-          Collapse All
-        </button>
+          <SelectTrigger
+            className="h-5 w-fit min-w-[4.5rem] shrink-0 gap-1 rounded border px-1.5 py-0 text-[11px] leading-none shadow-none [&_svg]:h-2.5 [&_svg]:w-2.5 [&_svg]:shrink-0"
+            aria-label="Expand depth"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent
+            container={floatingPortalContainer ?? undefined}
+            position="popper"
+            side="bottom"
+            align="start"
+            sideOffset={2}
+            className="max-h-[min(9rem,var(--radix-select-content-available-height))] w-[var(--radix-select-trigger-width)] min-w-[var(--radix-select-trigger-width)]"
+          >
+            <SelectItem value="default" className="py-1 pl-2 pr-8 text-xs">
+              default
+            </SelectItem>
+            {Array.from({ length: maxTreeDepth + 1 }, (_, i) => (
+              <SelectItem key={i} value={String(i)} className="py-1 pl-2 pr-8 font-mono text-xs">
+                {i}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <div className="flex flex-nowrap items-center gap-x-2">
+          {CALLTREE_FILTER_TOGGLES.map(({ label, key, title }) => (
+            <div key={key} className="flex shrink-0 items-center gap-1">
+              <Checkbox
+                id={`calltree-filter-${key}`}
+                checked={filters[key]}
+                onCheckedChange={(v) => updateFilter(key, v === true)}
+                className="h-3 w-3"
+                title={title}
+              />
+              <Label
+                htmlFor={`calltree-filter-${key}`}
+                className="cursor-pointer select-none font-mono text-[10px] font-normal text-muted-foreground leading-none peer-disabled:cursor-not-allowed"
+              >
+                {label}
+              </Label>
+            </div>
+          ))}
+        </div>
+        {onOpenInFloating && !hideFloatingOpenButton ? (
+          <div className="ml-auto flex shrink-0 items-center">
+            <button
+              type="button"
+              className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground"
+              title="Open in floating panel"
+              aria-label="Open in floating panel"
+              onClick={onOpenInFloating}
+            >
+              <PanelTop className="h-3 w-3" aria-hidden />
+            </button>
+          </div>
+        ) : null}
       </div>
 
       {/* virtual list */}
@@ -583,7 +682,7 @@ export function CallTreeViewer({ onSeekTo, onSelectFrame, onNavigateTo }: CallTr
                 node={node}
                 rowIndex={node.id}
                 isCollapsed={collapsed.has(node.id)}
-                isActive={node.type === 'frame' && node.contextId === activeContextId}
+                isActive={node.type === 'frame' && activeScope != null && nodeInScope(node, activeScope)}
                 isActiveEvent={node.id === activeEventNode?.id}
                 hoveredAddr={hoveredAddr}
                 onHoverAddr={handleHoverAddr}

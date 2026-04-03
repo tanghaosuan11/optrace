@@ -111,7 +111,7 @@ export function extractSourceList(
   if (!root || typeof root !== "object") return Object.keys(sources);
   const o = root as Record<string, unknown>;
 
-  // ── Priority 1: root.sourceIds (Sourcify v2: { "path/file.sol": { id: N }, ... }) ──
+  // Sourcify v2: root.sourceIds → { "path/file.sol": { id: N }, ... }
   const sourceIds = o.sourceIds;
   if (sourceIds && typeof sourceIds === "object" && !Array.isArray(sourceIds)) {
     const entries: [string, number][] = [];

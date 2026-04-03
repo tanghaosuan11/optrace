@@ -3,6 +3,7 @@ import { ResizableSideDrawer } from "@/components/ui/resizable-side-drawer";
 import { Input } from "@/components/ui/input";
 import { X } from "lucide-react";
 import { useDebugStore } from "@/store/debugStore";
+import { useDrawerActions } from "@/hooks/useDrawerActions";
 
 interface BookmarksDrawerProps {
   /** Called when user clicks a bookmark row. App resolves stepIndex and calls navigateTo. */
@@ -15,7 +16,7 @@ export function BookmarksDrawer({ onNavigate }: BookmarksDrawerProps) {
   const breakpointLabels = useDebugStore((s) => s.breakpointLabels);
   const setBreakpointLabel = useDebugStore((s) => s.setBreakpointLabel);
   const removeBreakpointLabel = useDebugStore((s) => s.removeBreakpointLabel);
-  const close = () => useDebugStore.getState().sync({ isBookmarksOpen: false });
+  const { closeBookmarks } = useDrawerActions();
 
   // Group by frameId, sorted frames by frameId string, pcs sorted numerically
   const groups: { frameId: string; pcs: number[] }[] = [];
@@ -27,12 +28,12 @@ export function BookmarksDrawer({ onNavigate }: BookmarksDrawerProps) {
   const totalCount = groups.reduce((n, g) => n + g.pcs.length, 0);
 
   return (
-    <ResizableSideDrawer open={isOpen} onClose={close} side="left" defaultWidth={280}>
+    <ResizableSideDrawer open={isOpen} onClose={closeBookmarks} side="left" defaultWidth={280}>
         {/* Header */}
         <div className="flex items-center px-3 py-1.5 flex-shrink-0 border-b bg-muted/60">
           <span className="text-[11px] font-medium">Bookmarks ({totalCount})</span>
           <button
-            onClick={close}
+            onClick={closeBookmarks}
             className="ml-auto flex items-center justify-center opacity-50 hover:opacity-100 transition-opacity"
           >
             <X className="h-3 w-3" />
@@ -64,7 +65,7 @@ export function BookmarksDrawer({ onNavigate }: BookmarksDrawerProps) {
                         label={breakpointLabels.get(pc) ?? ""}
                         onLabelChange={(l) => setBreakpointLabel(pc, l)}
                         onRemoveLabel={() => removeBreakpointLabel(pc)}
-                        onJump={onNavigate ? () => { close(); onNavigate(frameId, pc); } : undefined}
+                        onJump={onNavigate ? () => { closeBookmarks(); onNavigate(frameId, pc); } : undefined}
                       />
                     ))}
                   </div>

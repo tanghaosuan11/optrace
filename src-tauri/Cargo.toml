@@ -37,6 +37,8 @@ tauri-plugin-window-state = "2.4.1"
 tauri-plugin-store = "2"
 rayon = "1"
 rquickjs = { version = "0.6", features = ["bindgen"] }
+sha2 = "0.10"
+hex = "0.4"
 
 
 [profile.dev]

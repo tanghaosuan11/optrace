@@ -38,6 +38,7 @@ impl StorageTracer {
     /// 生成存储变化记录
     pub fn create_change_record(
         step_index: usize,
+        transaction_id: u32,
         frame_id: u16,
         is_transient: bool,
         is_read: bool,
@@ -48,6 +49,7 @@ impl StorageTracer {
     ) -> StorageChangeRecord {
         StorageChangeRecord {
             step_index,
+            transaction_id,
             frame_id,
             is_transient,
             is_read,

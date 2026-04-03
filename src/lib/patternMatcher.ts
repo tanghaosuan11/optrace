@@ -148,10 +148,13 @@ export function findPatternMatches(
 
     // 检查从位置 i 开始是否能匹配整个模式
     for (let j = 0; j < patterns.length; j++) {
-      if (!matchInstruction(patterns[j], opcodes[i + j])) {
+      const ok = matchInstruction(patterns[j], opcodes[i + j]);
+      if (!ok) {
         console.log(`Pattern "${patterns[j]}" did not match instruction "${opcodes[i + j]}"`);
         matched = false;
         break;
+      } else {
+        console.log(`Pattern "${patterns[j]}" matched instruction "${opcodes[i + j]}"`);
       }
 
       // 记录匹配的指令

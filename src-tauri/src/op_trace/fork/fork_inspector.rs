@@ -1,4 +1,10 @@
 //! ForkInspector：包装现有 Cheatcodes，在指定步注入 stack/memory patch。
+//!
+//! DEPRECATED:
+//! This adapter is being phased out. Patch injection is now handled directly
+//! by the unified `Cheatcodes` inspector via `set_patches(...)`.
+//! Keep this file only for temporary compatibility with legacy paths.
+#![allow(deprecated)]
 
 use crate::optrace_journal::OpTraceJournal;
 use revm::{
@@ -20,6 +26,10 @@ use super::StatePatch;
 use std::sync::{Arc, Mutex};
 
 
+#[deprecated(
+    since = "0.1.8",
+    note = "Use unified Cheatcodes + set_patches path instead of ForkInspector."
+)]
 pub(crate) struct ForkInspector<BlockT, TxT, CfgT> {
     pub inner: Cheatcodes<BlockT, TxT, CfgT>,
     pub(crate) patches: Vec<StatePatch>,
@@ -28,6 +38,10 @@ pub(crate) struct ForkInspector<BlockT, TxT, CfgT> {
 }
 
 impl<BlockT, TxT, CfgT> ForkInspector<BlockT, TxT, CfgT> {
+    #[deprecated(
+        since = "0.1.8",
+        note = "Use Cheatcodes::new + set_patches in evm_runner."
+    )]
     pub fn new(
         encoder: MessageEncoder,
         debug_session: Arc<Mutex<DebugSession>>,
@@ -47,18 +61,34 @@ impl<BlockT, TxT, CfgT> ForkInspector<BlockT, TxT, CfgT> {
         }
     }
 
+    #[deprecated(
+        since = "0.1.8",
+        note = "Use Cheatcodes::flush_steps from unified path."
+    )]
     pub fn flush_steps(&mut self) {
         self.inner.flush_steps();
     }
 
+    #[deprecated(
+        since = "0.1.8",
+        note = "Use Cheatcodes::send_finished from unified path."
+    )]
     pub fn send_finished(&self) {
-        self.inner.send_finished();
+        self.inner.send_finished(None);
     }
 
+    #[deprecated(
+        since = "0.1.8",
+        note = "Use Cheatcodes::send_balance_changes from unified path."
+    )]
     pub fn send_balance_changes(&self, json: &str) {
         self.inner.send_balance_changes(json);
     }
 
+    #[deprecated(
+        since = "0.1.8",
+        note = "Use Cheatcodes::set_patches with unified inspector."
+    )]
     pub fn new_from_cheatcodes(
         inner: Cheatcodes<BlockT, TxT, CfgT>,
         mut patches: Vec<StatePatch>,

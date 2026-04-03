@@ -103,6 +103,7 @@ export function BalanceChangesViewer() {
   const scanUrl = useDebugStore((s) => s.config.scanUrl);
   const [tokenInfoMap, setTokenInfoMap] = useState<Record<string, TokenInfo>>({});
   const [fetching, setFetching] = useState(false);
+  const showTxCol = changes.some((c) => c.transactionId !== undefined);
 
   const handleFetchTokenInfo = async () => {
     const { rpcUrl } = getBackendConfig();
@@ -148,6 +149,9 @@ export function BalanceChangesViewer() {
         <table className="w-full text-[11px]">
           <thead className="sticky top-0 bg-background border-b z-10">
             <tr>
+              {showTxCol && (
+                <th className="text-left font-medium text-muted-foreground px-3 py-1.5 w-[60px]">Tx</th>
+              )}
               <th className="text-left font-medium text-muted-foreground px-3 py-1.5">Address</th>
               <th className="text-left font-medium text-muted-foreground px-3 py-1.5 w-[180px]">ETH</th>
               <th className="text-left font-medium text-muted-foreground px-3 py-1.5">Token Changes</th>
@@ -156,6 +160,17 @@ export function BalanceChangesViewer() {
           <tbody>
             {changes.map((entry, i) => (
               <tr key={i} className="border-b hover:bg-muted/30 align-top">
+                {showTxCol && (
+                  <td className="px-3 py-1.5">
+                    {entry.transactionId !== undefined ? (
+                      <span className="font-mono text-[10px] text-muted-foreground">
+                        #{entry.transactionId + 1}
+                      </span>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </td>
+                )}
                 {/* Address */}
                 <td className="px-3 py-1.5">
                   <AddrLink address={entry.address} scanUrl={scanUrl} />

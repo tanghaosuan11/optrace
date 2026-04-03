@@ -1,9 +1,6 @@
 /**
  * PanelContextMenu — compact context menu for data panels (Stack / Memory / Storage).
- * All items use smaller text + tighter padding so the menu doesn't dominate the UI.
- *
- * Re-exports the same API as the base context-menu, just with panel-sized defaults.
- * Import everything from here instead of "@/components/ui/context-menu" in panels.
+ * Uses `bg-background` / `border-border` so it matches app chrome instead of `bg-popover`.
  */
 import * as React from "react";
 import {
@@ -15,33 +12,39 @@ import {
 } from "@/components/ui/context-menu";
 import { cn } from "@/lib/utils";
 
-// Content: smaller min-width, compact padding
+// Content: same surface tokens as cards / inspector (not default popover tint)
 const PanelContextMenuContent = React.forwardRef<
   React.ElementRef<typeof ContextMenuContent>,
   React.ComponentPropsWithoutRef<typeof ContextMenuContent>
 >(({ className, ...props }, ref) => (
   <ContextMenuContent
     ref={ref}
-    className={cn("min-w-[9rem] p-0.5", className)}
+    className={cn(
+      "min-w-[8rem] border border-border bg-background p-0.5 text-foreground shadow-sm",
+      className,
+    )}
     {...props}
   />
 ));
 PanelContextMenuContent.displayName = "PanelContextMenuContent";
 
-// Item: text-[11px], tight padding
+// Item: compact type; highlight with muted (aligns with list rows / panels, not stark accent)
 const PanelContextMenuItem = React.forwardRef<
   React.ElementRef<typeof ContextMenuItem>,
   React.ComponentPropsWithoutRef<typeof ContextMenuItem>
 >(({ className, ...props }, ref) => (
   <ContextMenuItem
     ref={ref}
-    className={cn("text-[11px] leading-tight px-2 py-px rounded-[3px]", className)}
+    className={cn(
+      "px-2 py-1 text-[10px] leading-tight focus:bg-muted focus:text-foreground data-[highlighted]:bg-muted data-[highlighted]:text-foreground",
+      className,
+    )}
     {...props}
   />
 ));
 PanelContextMenuItem.displayName = "PanelContextMenuItem";
 
-// Separator: thinner margin
+// Separator: tight for small menu
 const PanelContextMenuSeparator = React.forwardRef<
   React.ElementRef<typeof ContextMenuSeparator>,
   React.ComponentPropsWithoutRef<typeof ContextMenuSeparator>

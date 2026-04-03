@@ -35,6 +35,7 @@ function isSmallKey(key: string) { try { return BigInt(key) < SMALL_THRESHOLD; }
 
 export function StorageViewer() {
   const storageChanges = useDebugStore((s) => s.storageChanges);
+  const txBoundaries = useDebugStore((s) => s.txBoundaries);
   const currentStepIndex = useDebugStore((s) => s.currentStepIndex);
   const callType = useDebugStore((s) => s.callType);
   const callerAddress = useDebugStore((s) => s.callerAddress);
@@ -46,6 +47,8 @@ export function StorageViewer() {
   // 槽位注解抽屉
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [drawerAddress, setDrawerAddress] = useState<string | undefined>();
+
+  const showTxOnStorage = Boolean(txBoundaries && txBoundaries.length > 0);
 
   const visibleChanges = useMemo(
     () => storageChanges.filter(e =>
@@ -265,6 +268,11 @@ export function StorageViewer() {
                                   i % 2 === 0 ? "bg-muted/30" : ""
                                 }`}
                               >
+                                {showTxOnStorage && h.transactionId !== undefined && (
+                                  <span className="text-[10px] text-muted-foreground shrink-0 tabular-nums" title="交易（1-based）">
+                                    Tx{h.transactionId + 1}
+                                  </span>
+                                )}
                                 <span className="text-amber-500 shrink-0">#{h.stepIndex}</span>
                                 <span className="text-muted-foreground shrink-0">{h.hadValue}</span>
                                 <span className="text-muted-foreground shrink-0">→</span>

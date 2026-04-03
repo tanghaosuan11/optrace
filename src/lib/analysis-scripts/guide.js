@@ -12,11 +12,12 @@
 // The script's return value (last expression) is displayed as
 // the result. Return an array or object for best readability.
 //
-// ── Step Object ─────────────────────────────────────────────
+// Step Object
 //
 //   stepIndex    {number}   global step index (click to jump)
 //   index        {number}   same as stepIndex (legacy alias)
-//   contextId    {number}   call frame ID
+//   contextId    {number}   call frame ID (per-tx; starts at 1 within each transaction)
+//   transactionId {number}  which transaction (0-based); single-tx sessions use 0
 //   frameStep    {number}   step counter within the frame
 //   pc           {number}   program counter
 //   opcode       {string}   opcode name, e.g. "SSTORE"
@@ -28,7 +29,7 @@
 //   target       {string}   call target address (hex, 0x-prefixed)
 //   stack        {string[]} stack items as 0x-prefixed hex (top = last)
 //
-// ── Built-in Helpers ────────────────────────────────────────
+// Built-in Helpers
 //
 //   hexToNumber(hex)
 //     Convert a 0x-prefixed hex string to a JS number.
@@ -41,7 +42,7 @@
 //     Returns a 0x-prefixed hex string.
 //     Example: readMemory(s, 0, 32)
 //
-// ── Pre-execution Filters (@filter directives) ──────────────
+// Pre-execution Filters (@filter directives)
 //
 // Write filter directives as comments at the top of the script.
 // The backend applies them before injecting steps into JS,
@@ -65,6 +66,12 @@
 //   // @filter frames:   1, 5, 10
 //     Only include steps belonging to the listed frame IDs
 //     (contextId values). Use the Call Tree to find frame IDs.
+//     **Required with frames:** you must also set transaction_id (same section),
+//     because frame IDs repeat across transactions. Single-tx sessions use 0.
+//
+//   // @filter transaction_id: 0
+//     Only include steps from that transaction (0-based index). **Mandatory**
+//     whenever // @filter frames: ... is present (use 0 for single-tx).
 //
 //   // @filter steps:    100000-200000
 //     Only include steps whose global index is within [from, to]
@@ -79,13 +86,18 @@
 //   // @filter contract: 0xA0b86991c6218b36c1d19d4a2e9eb0ce3606eb48
 //   // @filter steps:    0-500000
 //
+// Example (frame filter — must include transaction_id):
+//
+//   // @filter frames: 1, 2
+//   // @filter transaction_id: 0
+//
 //   trace.map(s => ({
 //     stepIndex: s.stepIndex,
 //     slot:  s.stack[s.stack.length - 1],
 //     value: s.stack[s.stack.length - 2],
 //   }))
 //
-// ── Lazy Mode (@lazy) ───────────────────────────────────────
+// Lazy Mode (@lazy)
 //
 // Add // @lazy anywhere in the script to skip the trace injection
 // step entirely. trace and steps will be empty arrays. All data
@@ -102,7 +114,7 @@
 // Note: readMemory() and iteration over trace/steps will not work
 // in lazy mode. Use getStep(i) for individual step access.
 //
-// ── Query API (Memory-efficient, Rust-side) ─────────────────
+// Query API (Rust-side)
 //
 // These functions operate directly on the trace data in Rust,
 // avoiding the cost of injecting large arrays into JS.
@@ -155,13 +167,17 @@
 //     Useful for tracking balance/allowance changes in hack analysis.
 //     Example: getSlotHistory("0x0000000000000000000000000000000000000000000000000000000000000001")
 //
-//   getFrameInfo(frameId)
-//     Returns full metadata for a call frame by its ID (the contextId on step objects).
-//     Result: {frameId, parentId, depth, address, caller, target, kind,
+//   getFrameInfo(frameId, transactionId?)
+//     Returns full metadata for a call frame by in-tx frameId (= contextId on steps).
+//     Multi-tx sessions: the same contextId can appear in different transactions — pass
+//     **transactionId** as the second argument (must match step.transactionId).
+//     Single-tx sessions: omit the second argument (same as 0).
+//     Result: {frameId, transactionId, parentId, depth, address, caller, target, kind,
 //              gasLimit, gasUsed, stepCount, success}  | null
 //     kind: "Call" | "StaticCall" | "DelegateCall" | "CallCode" | "Create" | "Create2"
 //     Example: getFrameInfo(5)
-//     Example: getFrameInfo(getStep(idx).contextId)
+//     Example: getFrameInfo(3, 1)   // frame 3 in the 2nd transaction (index 1)
+//     Example: getFrameInfo(getStep(idx).contextId, getStep(idx).transactionId)
 //
 //   getStorageChanges(address?, from?, to?)
 //     Returns all storage reads AND writes for a contract address.
@@ -175,7 +191,7 @@
 //     Save data to a file in the App Data directory.
 //     Example: saveDataRaw("filename.json", JSON.stringify(results))
 //
-// ── Recommended Pattern for Large Transactions ──────────────
+// Recommended pattern (large traces)
 //
 //   // Step 1: find indices in Rust (cheap)
 //   const sstoreIndices = findStepIndices("SSTORE");
@@ -190,18 +206,18 @@
 //
 //   results
 //
-// ── Result Interactivity ────────────────────────────────────
+// Result interactivity
 //
 // Any numeric value under the key "stepIndex" in the result
 // is rendered as a clickable link. Clicking it seeks the
 // debugger to that step.
 //
-// ── Keyboard Shortcuts ──────────────────────────────────────
+// Keyboard shortcuts
 //
 //   Ctrl+Enter  Run the current script
 //   Ctrl+S      Save the current script
 //
-// ── Tips ────────────────────────────────────────────────────
+// Tips
 //
 //   • For large transactions (700k+ steps):
 //     - Add // @lazy if you only need query API functions.

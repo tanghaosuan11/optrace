@@ -7,11 +7,10 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { OP_MAP, OPCODE_INFO } from "@/lib/opcodes";
 import { BookOpen, Layers, ListFilter, Bookmark } from "lucide-react";
 import { useDebugStore } from "@/store/debugStore";
+import { useDrawerActions } from "@/hooks/useDrawerActions";
 import {
   PanelContextMenu,
   PanelContextMenuTrigger,
-  PanelContextMenuContent,
-  PanelContextMenuItem,
 } from "@/components/ui/panel-context-menu";
 // import { addStepMarkFromOpcode } from "@/components/NotesDrawer";
 
@@ -52,6 +51,7 @@ const OPCODE_FILTER_OPTIONS: { label: string; names: string[] }[] = [
 ];
 
 export function OpcodeViewer({ onStackFieldsToggle, onToggleBreakpoint }: OpcodeViewerProps) {
+  const { openBookmarks } = useDrawerActions();
   const opcodes = useDebugStore((s) => s.opcodes);
   const currentPc = useDebugStore((s) => s.currentPc);
   const currentGasCost = useDebugStore((s) => s.currentGasCost);
@@ -257,17 +257,17 @@ export function OpcodeViewer({ onStackFieldsToggle, onToggleBreakpoint }: Opcode
               size={13}
               aria-label="Bookmarks"
               className="cursor-pointer hover:opacity-70"
-              onClick={() => useDebugStore.getState().sync({ isBookmarksOpen: true })}
+              onClick={openBookmarks}
             />
           </div>
           <div className="flex items-center gap-1">
             <Input
               type="text"
-              placeholder="PC (0x... or dec)"
+              placeholder="PC (0x)"
               value={searchPc}
               onChange={(e) => setSearchPc(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleSearch()}
-              className="w-24 h-5 text-[10px]"
+              className="w-16 h-5 text-[10px] "
             />
             <svg
               xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none"
@@ -513,11 +513,11 @@ export function OpcodeViewer({ onStackFieldsToggle, onToggleBreakpoint }: Opcode
                     </div>
                   </div>
                     </PanelContextMenuTrigger>
-                    <PanelContextMenuContent>
+                    {/* <PanelContextMenuContent>
                       <PanelContextMenuItem onSelect={() => useDebugStore.getState().clearBackwardSliceHighlight()}>
                         Clear Data Flow Highlight
                       </PanelContextMenuItem>
-                      {/* Notes: hidden until feature is complete
+                      Notes: hidden until feature is complete
                       <PanelContextMenuItem
                         onSelect={() => {
                           const stepIndex = useDebugStore.getState().currentStepIndex;
@@ -527,8 +527,8 @@ export function OpcodeViewer({ onStackFieldsToggle, onToggleBreakpoint }: Opcode
                       >
                         Mark This Step
                       </PanelContextMenuItem>
-                      */}
-                    </PanelContextMenuContent>
+                     
+                    </PanelContextMenuContent> */}
                   </PanelContextMenu>
                 );
               })}

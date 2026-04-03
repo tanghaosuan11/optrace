@@ -7,6 +7,8 @@ import { invoke } from "@tauri-apps/api/core";
 
 export interface ShadowValidationMismatch {
   step: number;
+  /** 多笔调试：与 frame_id 一起区分调用帧（0-based，与 trace 一致） */
+  transaction_id?: number | null;
   frame_id: number | null;
   opcode: number;
   opcode_name: string;
@@ -29,11 +31,12 @@ export interface ShadowValidationReport {
  * @param start 起始步骤编号
  * @param end 结束步骤编号
  */
-export async function debugShadowSteps(start: number, end: number): Promise<string> {
+export async function debugShadowSteps(start: number, end: number, sessionId?: string): Promise<string> {
   try {
     const result = await invoke<string>("debug_shadow_steps", { 
       start: Math.floor(start),
-      end: Math.floor(end)
+      end: Math.floor(end),
+      sessionId,
     });
     console.log("=== Shadow Steps Debug Info ===");
     console.log(result);
@@ -52,7 +55,8 @@ export async function debugShadowSteps(start: number, end: number): Promise<stri
  */
 export async function countSkippedShadowSteps(
   start: number,
-  end: number
+  end: number,
+  sessionId?: string,
 ): Promise<[number, number, number]> {
   try {
     const result = await invoke<[number, number, number]>(
@@ -60,6 +64,7 @@ export async function countSkippedShadowSteps(
       {
         start: Math.floor(start),
         end: Math.floor(end),
+        sessionId,
       }
     );
     console.log(`=== Shadow Steps Count (${start}..${end}) ===`);
@@ -77,9 +82,9 @@ export async function countSkippedShadowSteps(
  * 导出所有步骤的影子信息到tmp文件
  * @returns 导出文件的路径
  */
-export async function exportAllShadowSteps(): Promise<string> {
+export async function exportAllShadowSteps(sessionId?: string): Promise<string> {
   try {
-    const result = await invoke<string>("export_all_shadow_steps");
+    const result = await invoke<string>("export_all_shadow_steps", { sessionId });
     console.log("✅ Shadow steps exported to:", result);
     return result;
   } catch (error) {
@@ -88,8 +93,9 @@ export async function exportAllShadowSteps(): Promise<string> {
   }
 }
 
-export async function validateShadowSteps(maxMismatches = 200): Promise<ShadowValidationReport> {
+export async function validateShadowSteps(maxMismatches = 200, sessionId?: string): Promise<ShadowValidationReport> {
   return invoke<ShadowValidationReport>("validate_shadow_steps", {
     maxMismatches: Math.max(1, Math.floor(maxMismatches)),
+    sessionId,
   });
 }

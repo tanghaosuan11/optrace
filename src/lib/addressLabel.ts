@@ -23,8 +23,6 @@ export interface CachedAddressLabels {
   fetchedAt: number;          
 }
 
-// ── 独立 Store 实例 ──────────────────────────────────────────────
-
 let _store: Store | null = null;
 let _loading: Promise<Store> | null = null;
 

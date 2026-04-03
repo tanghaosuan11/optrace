@@ -2,11 +2,28 @@ use revm::primitives::{Address, U256};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-// ── Frame metadata ────────────────────────────────────────────────────────────
+/// 多笔调试时定位一帧：每笔内 `frame_id` 从 1 递增，跨笔用 `transaction_id` 区分。
+pub type FrameScopeKey = (u32, u16);
+
+/// CFG 构建结果缓存键（与 `doc/CFG_后端分块与裁剪方案.md` §9 一致：bytecode + trace + onlyExecuted + frame 成败）
+#[derive(Clone, Hash, PartialEq, Eq)]
+pub struct CfgBuildCacheKey {
+    pub transaction_id: u32,
+    pub context_id: u16,
+    pub bytecode_digest: [u8; 32],
+    pub trace_digest: [u8; 32],
+    pub only_executed: bool,
+    /// 0 = 无 `frame_map` 记录，1 = success，2 = 失败
+    pub frame_success_bucket: u8,
+    /// `opcode_lines` 等展示策略变更时递增，避免命中旧缓存
+    pub payload_version: u8,
+}
+
 
 /// Saved once per call frame; populated at call() and finalized at call_end().
 #[derive(Clone)]
 pub struct FrameRecord {
+    pub transaction_id: u32,
     pub frame_id:        u16,
     pub parent_id:       u16,
     pub depth:           u16,
@@ -26,13 +43,14 @@ pub struct FrameRecord {
     pub success:         bool,
 }
 
-// ── Storage change record ────────────────────────────────────────────────────
 
 /// One storage read or write event, recorded during execution.
 #[derive(Clone)]
 pub struct StorageChangeRecord {
     /// Global step index (same convention as TraceStep; 1-indexed step counter at step_end)
     pub step_index:  usize,
+    /// 多笔交易时第几笔（0-based）；单 tx 恒为 0
+    pub transaction_id: u32,
     pub frame_id:    u16,
     pub is_transient: bool,
     /// true = SLOAD/TLOAD read, false = SSTORE/TSTORE write
@@ -48,6 +66,8 @@ pub struct StorageChangeRecord {
 /// 每个step的轻量存储，供 seek_to 使用
 #[derive(Clone)]
 pub struct TraceStep {
+    /// 多笔交易时第几笔（0-based）；单 tx 恒为 0
+    pub transaction_id: u32,
     pub context_id: u16,
     pub frame_step: u32,    // frame 内部步数
     pub pc: u32,
@@ -92,15 +112,19 @@ impl FrameMemory {
 /// 调试会话：执行结束后持久存储，供 seek_to 查询
 pub struct DebugSession {
     pub trace: Vec<TraceStep>,
-    pub frame_memories: HashMap<u16, FrameMemory>,
-    /// per-context 步骤索引：context_id → 全局步骤下标数组（单调递增）
-    pub step_index: HashMap<u16, Vec<usize>>,
-    /// frame_id → frame metadata (populated during execution)
-    pub frame_map: HashMap<u16, FrameRecord>,
+    pub frame_memories: HashMap<FrameScopeKey, FrameMemory>,
+    /// per-(transaction_id, context_id) 步骤索引：全局步骤下标数组（单调递增）
+    pub step_index: HashMap<FrameScopeKey, Vec<usize>>,
+    /// (transaction_id, frame_id) → frame metadata（frame_id 每笔内从 1 起）
+    pub frame_map: HashMap<FrameScopeKey, FrameRecord>,
     /// All storage read/write events in execution order
     pub storage_changes: Vec<StorageChangeRecord>,
     /// 数据流追踪（Shadow Stack / Memory / Storage）
     pub shadow: Option<super::shadow::ShadowState>,
+    /// 每帧的字节码，供 CFG 后端构建使用
+    pub frame_bytecodes: HashMap<FrameScopeKey, Vec<u8>>,
+    /// `build_cfg` 结果缓存（bincode 序列化的 `CfgResult`）
+    pub cfg_build_cache: HashMap<CfgBuildCacheKey, Vec<u8>>,
 }
 
 impl DebugSession {
@@ -112,15 +136,26 @@ impl DebugSession {
             frame_map: HashMap::new(),
             storage_changes: Vec::new(),
             shadow: None,
+            frame_bytecodes: HashMap::new(),
+            cfg_build_cache: HashMap::new(),
         }
     }
 
     pub fn push_frame_record(&mut self, record: FrameRecord) {
-        self.frame_map.insert(record.frame_id, record);
+        let key = (record.transaction_id, record.frame_id);
+        self.frame_map.insert(key, record);
     }
 
-    pub fn finalize_frame(&mut self, frame_id: u16, gas_used: u64, success: bool, step_count: usize) {
-        if let Some(rec) = self.frame_map.get_mut(&frame_id) {
+    pub fn finalize_frame(
+        &mut self,
+        transaction_id: u32,
+        frame_id: u16,
+        gas_used: u64,
+        success: bool,
+        step_count: usize,
+    ) {
+        let key = (transaction_id, frame_id);
+        if let Some(rec) = self.frame_map.get_mut(&key) {
             rec.gas_used   = gas_used;
             rec.success    = success;
             rec.step_count = step_count;
@@ -134,32 +169,53 @@ impl DebugSession {
     /// 追加一个 step 到 trace 并更新索引
     pub fn push_step(&mut self, step: TraceStep) {
         let idx = self.trace.len();
-        let cid = step.context_id;
+        let key = (step.transaction_id, step.context_id);
         self.trace.push(step);
-        self.step_index.entry(cid).or_default().push(idx);
+        self.step_index.entry(key).or_default().push(idx);
     }
 
     /// 追加全量内存快照
-    pub fn push_snapshot(&mut self, context_id: u16, frame_step: u32, data: Vec<u8>) {
+    pub fn push_snapshot(
+        &mut self,
+        transaction_id: u32,
+        context_id: u16,
+        frame_step: u32,
+        data: Vec<u8>,
+    ) {
+        let key = (transaction_id, context_id);
         self.frame_memories
-            .entry(context_id)
+            .entry(key)
             .or_insert_with(FrameMemory::new)
             .snapshots
             .push(MemorySnapshot { frame_step, data });
     }
 
     /// 追加增量内存补丁
-    pub fn push_patch(&mut self, context_id: u16, frame_step: u32, dst_offset: u32, data: Vec<u8>) {
+    pub fn push_patch(
+        &mut self,
+        transaction_id: u32,
+        context_id: u16,
+        frame_step: u32,
+        dst_offset: u32,
+        data: Vec<u8>,
+    ) {
+        let key = (transaction_id, context_id);
         self.frame_memories
-            .entry(context_id)
+            .entry(key)
             .or_insert_with(FrameMemory::new)
             .patches
             .push(MemoryPatch { frame_step, dst_offset, data });
     }
 
     /// 计算指定 frame 在指定 frame_step 时的完整内存
-    pub fn compute_memory_at_step(&self, context_id: u16, target_frame_step: u32) -> Vec<u8> {
-        let fm = match self.frame_memories.get(&context_id) {
+    pub fn compute_memory_at_step(
+        &self,
+        transaction_id: u32,
+        context_id: u16,
+        target_frame_step: u32,
+    ) -> Vec<u8> {
+        let key = (transaction_id, context_id);
+        let fm = match self.frame_memories.get(&key) {
             Some(fm) => fm,
             None => return Vec::new(),
         };
@@ -240,8 +296,8 @@ impl DebugSession {
     /// 仅在当前 context_id 内搜索
     pub fn find_value_origin(&self, global_index: usize, value: U256) -> Option<usize> {
         let current = self.trace.get(global_index)?;
-        let context_id = current.context_id;
-        let indices = self.step_index.get(&context_id)?;
+        let key = (current.transaction_id, current.context_id);
+        let indices = self.step_index.get(&key)?;
         // pos-1 对应 global_index，搜索范围是 0..pos-1（不含当前步）
         let pos = indices.partition_point(|&i| i <= global_index);
         if pos < 2 {
@@ -258,4 +314,30 @@ impl DebugSession {
 }
 
 /// Tauri 全局状态
-pub struct DebugSessionState(pub Arc<Mutex<Option<DebugSession>>>);
+pub type SessionId = String;
+#[derive(Default)]
+pub struct SessionEntry {
+    /// 执行结束后持久化的 DebugSession；执行中为 None
+    pub session: Option<DebugSession>,
+    /// 是否正在运行 op_trace（防止同一会话并发启动/覆盖）
+    pub is_running: bool,
+    /// 最近更新时间戳（毫秒），用于后续回收策略
+    pub updated_at_ms: u64,
+}
+
+pub type DebugSessionMap = HashMap<SessionId, SessionEntry>;
+
+pub const DEFAULT_SESSION_ID: &str = "__default__";
+
+pub fn normalize_session_id(session_id: Option<&str>) -> SessionId {
+    match session_id.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) => id.to_string(),
+        None => DEFAULT_SESSION_ID.to_string(),
+    }
+}
+
+pub fn no_session_error(session_id: &str) -> String {
+    format!("No debug session active for session_id={}", session_id)
+}
+
+pub struct DebugSessionState(pub Arc<Mutex<DebugSessionMap>>);

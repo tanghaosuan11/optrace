@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CFG SVG benchmark (DOT / paste SVG) — OpTrace</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 13px/1.4 system-ui, sans-serif;
+      background: #0a0a0a;
+      color: #e5e5e5;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    .hint {
+      padding: 10px 12px;
+      background: #171717;
+      border-bottom: 1px solid #333;
+      font-size: 12px;
+      color: #a3a3a3;
+    }
+    .hint code { color: #86efac; }
+    .row { display: flex; flex: 1; min-height: 0; }
+    .panel {
+      width: 42%;
+      min-width: 280px;
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid #333;
+      background: #111;
+    }
+    .panel h2 {
+      margin: 0;
+      padding: 8px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      color: #737373;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    textarea {
+      flex: 1;
+      min-height: 120px;
+      margin: 0 12px 8px;
+      padding: 10px;
+      font: 12px/1.35 ui-monospace, "Courier New", monospace;
+      background: #0a0a0a;
+      color: #fafafa;
+      border: 1px solid #333;
+      border-radius: 6px;
+      resize: vertical;
+    }
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      padding: 0 12px 10px;
+    }
+    button {
+      padding: 6px 12px;
+      font-size: 12px;
+      border-radius: 6px;
+      border: 1px solid #404040;
+      background: #262626;
+      color: #fafafa;
+      cursor: pointer;
+    }
+    button:hover { background: #333; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.primary { background: #2563eb; border-color: #1d4ed8; }
+    button.primary:hover { background: #1d4ed8; }
+    label { font-size: 12px; display: flex; align-items: center; gap: 6px; }
+    .status { font-size: 11px; color: #eab308; min-height: 1.2em; padding: 0 12px 10px; }
+    .viewport-wrap {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      background: #0a0a0a;
+    }
+    .viewport-tools {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      padding: 8px 12px;
+      border-bottom: 1px solid #333;
+    }
+    .cfg-svg-viewport {
+      flex: 1;
+      min-height: 200px;
+      touch-action: none;
+      user-select: none;
+      overflow: hidden;
+      background: #fff;
+      cursor: grab;
+    }
+    .cfg-svg-viewport:active { cursor: grabbing; }
+    .cfg-svg-viewport svg {
+      display: block;
+      max-width: none;
+      pointer-events: none;
+      font-family: "Courier New", Courier, monospace;
+    }
+    .cfg-svg-viewport.cfg-dragging svg text { text-rendering: optimizeSpeed; }
+    .cfg-svg-viewport.cfg-dragging svg path,
+    .cfg-svg-viewport.cfg-dragging svg polygon { shape-rendering: crispEdges; }
+    .cfg-svg-viewport .edge path,
+    .cfg-svg-viewport .edge polygon { shape-rendering: crispEdges; }
+    .mono { font-family: ui-monospace, monospace; font-size: 11px; color: #a3a3a3; }
+  </style>
+</head>
+<body>
+  <div class="hint">
+    <strong>用途：</strong>与 OpTrace CFG 窗口同交互（<code>translate + scale</code>、滚轮、拖拽），对比「Chrome / Tauri WebView」或「DOT 生成 vs 粘贴 SVG」。
+    <br />
+    <strong>打开方式：</strong>需 <strong>HTTP</strong>（<code>npm run dev</code> 后访问 <code>/cfg-svg-benchmark.html</code>），或 <code>npx serve public</code> 再打开；纯 <code>file://</code> 可能无法加载 CDN 上的 WASM。
+  </div>
+  <div class="row">
+    <div class="panel">
+      <h2>DOT → Graphviz（@hpcc-js/wasm 2.33.x，与 OpTrace 同）</h2>
+      <textarea id="dotInput" spellcheck="false" placeholder="digraph G { ... }"></textarea>
+      <div class="toolbar">
+        <button type="button" class="primary" id="btnRender">Render DOT</button>
+        <label><input type="file" id="dotFile" accept=".dot,.gv,text/plain" style="display:none" /><button type="button" id="btnPickDot">Load .dot file</button></label>
+        <button type="button" id="btnClearDot">Clear</button>
+      </div>
+      <h2>或粘贴 OpTrace 最终 SVG（跳过布局）</h2>
+      <textarea id="svgInput" spellcheck="false" placeholder="从 CfgWindow 复制整段 &lt;svg&gt;…&lt;/svg&gt; 或外层 HTML 中的 SVG 字符串"></textarea>
+      <div class="toolbar">
+        <button type="button" class="primary" id="btnPasteSvg">Use pasted SVG</button>
+        <button type="button" id="btnExportSvg">Download current SVG</button>
+      </div>
+      <div class="status" id="status"></div>
+    </div>
+    <div class="viewport-wrap">
+      <div class="viewport-tools">
+        <label><input type="checkbox" id="zoomLocked" /> Zoom locked（锁定时滚轮平移，不缩放）</label>
+        <button type="button" id="btnFit">Fit to view</button>
+        <button type="button" id="btnReset">Reset pan/zoom</button>
+        <span class="mono" id="transformInfo"></span>
+      </div>
+      <div class="cfg-svg-viewport" id="viewport">
+        <div id="transformLayer" style="transform-origin: 0 0; will-change: transform;">
+          <div id="svgHost"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    // Match src/components/CfgWindow.tsx
+    const WHEEL_PAN_FACTOR = 0.85;
+    const WHEEL_ZOOM_SENS = 0.002;
+    const MIN_SCALE = 0.15;
+    const MAX_SCALE = 4;
+
+    const dotInput = document.getElementById("dotInput");
+    const svgInput = document.getElementById("svgInput");
+    const svgHost = document.getElementById("svgHost");
+    const viewport = document.getElementById("viewport");
+    const transformLayer = document.getElementById("transformLayer");
+    const statusEl = document.getElementById("status");
+    const transformInfo = document.getElementById("transformInfo");
+    const zoomLockedEl = document.getElementById("zoomLocked");
+
+    const panRef = { x: 0, y: 0 };
+    const scaleRef = { s: 1 };
+    const dragRef = { active: false, pid: null, sx: 0, sy: 0, ox: 0, oy: 0 };
+
+    function setStatus(msg, isErr = false) {
+      statusEl.textContent = msg;
+      statusEl.style.color = isErr ? "#f87171" : "#eab308";
+    }
+
+    function applyTransform(x, y, s) {
+      panRef.x = x;
+      panRef.y = y;
+      scaleRef.s = s;
+      transformLayer.style.transform = `translate(${x}px, ${y}px) scale(${s})`;
+      transformInfo.textContent = `translate(${x.toFixed(0)}, ${y.toFixed(0)}) scale(${s.toFixed(3)})`;
+    }
+
+    function syncWrapperSizeFromSvg() {
+      const svg = svgHost.querySelector("svg");
+      if (!svg) return;
+      const vb = svg.viewBox.baseVal;
+      const w = vb.width || Number(svg.getAttribute("width")) || 0;
+      const h = vb.height || Number(svg.getAttribute("height")) || 0;
+      if (w > 0 && h > 0) {
+        transformLayer.style.width = `${w}px`;
+        transformLayer.style.height = `${h}px`;
+      }
+    }
+
+    function fitToView() {
+      const svg = svgHost.querySelector("svg");
+      if (!svg) return;
+      const vb = svg.viewBox.baseVal;
+      const gw = vb.width || Number(svg.getAttribute("width")) || 400;
+      const gh = vb.height || Number(svg.getAttribute("height")) || 300;
+      const rw = viewport.clientWidth;
+      const rh = viewport.clientHeight;
+      if (rw > 0 && rh > 0 && gw > 0 && gh > 0) {
+        const k = Math.max(MIN_SCALE, Math.min(MAX_SCALE, Math.min((rw - 16) / gw, (rh - 16) / gh, 1.2)));
+        applyTransform((rw - gw * k) / 2, (rh - gh * k) / 2, k);
+      } else {
+        applyTransform(8, 8, 1);
+      }
+    }
+
+    /** @type {import("@hpcc-js/wasm").Graphviz | null} */
+    let gvInstance = null;
+
+    async function getGraphviz() {
+      if (!gvInstance) {
+        const { Graphviz } = await import(
+          "https://cdn.jsdelivr.net/npm/@hpcc-js/wasm@2.33.2/+esm"
+        );
+        gvInstance = await Graphviz.load();
+      }
+      return gvInstance;
+    }
+
+    document.getElementById("btnRender").addEventListener("click", async () => {
+      const dot = dotInput.value.trim();
+      if (!dot) {
+        setStatus("DOT 为空", true);
+        return;
+      }
+      setStatus("Layout…");
+      document.getElementById("btnRender").disabled = true;
+      try {
+        const gv = await getGraphviz();
+        const svg = gv.layout(dot, "svg", "dot");
+        svgHost.innerHTML = svg;
+        syncWrapperSizeFromSvg();
+        fitToView();
+        setStatus("OK (DOT → SVG)");
+      } catch (e) {
+        svgHost.innerHTML = "";
+        setStatus(String(e?.message ?? e), true);
+      } finally {
+        document.getElementById("btnRender").disabled = false;
+      }
+    });
+
+    document.getElementById("btnPasteSvg").addEventListener("click", () => {
+      const raw = svgInput.value.trim();
+      if (!raw) {
+        setStatus("SVG 为空", true);
+        return;
+      }
+      let html = raw;
+      if (!html.includes("<svg")) {
+        setStatus("未找到 <svg …>", true);
+        return;
+      }
+      svgHost.innerHTML = html;
+      const svg = svgHost.querySelector("svg");
+      if (!svg) {
+        setStatus("解析后无 <svg> 节点", true);
+        return;
+      }
+      syncWrapperSizeFromSvg();
+      fitToView();
+      setStatus("OK (pasted SVG)");
+    });
+
+    document.getElementById("btnExportSvg").addEventListener("click", () => {
+      const svg = svgHost.querySelector("svg");
+      if (!svg) {
+        setStatus("无 SVG 可导出", true);
+        return;
+      }
+      const blob = new Blob([svg.outerHTML], { type: "image/svg+xml;charset=utf-8" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "cfg-export.svg";
+      a.click();
+      URL.revokeObjectURL(a.href);
+      setStatus("已下载 cfg-export.svg");
+    });
+
+    document.getElementById("btnClearDot").addEventListener("click", () => {
+      dotInput.value = "";
+    });
+
+    document.getElementById("btnPickDot").addEventListener("click", () => {
+      document.getElementById("dotFile").click();
+    });
+    document.getElementById("dotFile").addEventListener("change", (e) => {
+      const f = e.target.files?.[0];
+      if (!f) return;
+      const r = new FileReader();
+      r.onload = () => {
+        dotInput.value = String(r.result ?? "");
+        setStatus("已载入 " + f.name);
+      };
+      r.readAsText(f);
+      e.target.value = "";
+    });
+
+    document.getElementById("btnFit").addEventListener("click", () => fitToView());
+    document.getElementById("btnReset").addEventListener("click", () => {
+      applyTransform(0, 0, 1);
+    });
+
+    viewport.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const x = panRef.x;
+      const y = panRef.y;
+      const s = scaleRef.s;
+      if (zoomLockedEl.checked) {
+        applyTransform(x - e.deltaX * WHEEL_PAN_FACTOR, y - e.deltaY * WHEEL_PAN_FACTOR, s);
+      } else {
+        const factor = Math.exp(-e.deltaY * WHEEL_ZOOM_SENS);
+        applyTransform(x, y, Math.min(MAX_SCALE, Math.max(MIN_SCALE, s * factor)));
+      }
+    }, { passive: false });
+
+    viewport.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      dragRef.active = true;
+      dragRef.pid = e.pointerId;
+      dragRef.sx = e.clientX;
+      dragRef.sy = e.clientY;
+      dragRef.ox = panRef.x;
+      dragRef.oy = panRef.y;
+      viewport.setPointerCapture(e.pointerId);
+      viewport.classList.add("cfg-dragging");
+    });
+    viewport.addEventListener("pointermove", (e) => {
+      if (!dragRef.active || e.pointerId !== dragRef.pid) return;
+      applyTransform(
+        dragRef.ox + (e.clientX - dragRef.sx),
+        dragRef.oy + (e.clientY - dragRef.sy),
+        scaleRef.s
+      );
+    });
+    function endDrag(e) {
+      if (!dragRef.active || e.pointerId !== dragRef.pid) return;
+      dragRef.active = false;
+      dragRef.pid = null;
+      viewport.classList.remove("cfg-dragging");
+      try {
+        viewport.releasePointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
+    }
+    viewport.addEventListener("pointerup", endDrag);
+    viewport.addEventListener("pointercancel", endDrag);
+
+    // default sample
+    dotInput.value = `digraph G {
+  rankdir=TB;
+  a -> b -> c;
+  a -> c;
+}`;
+
+    setStatus("就绪。点 Render DOT 或粘贴 SVG。");
+  </script>
+</body>
+</html>

@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
+import { BottomSheetShell } from "@/components/ui/bottom-sheet-shell";
+import { SheetClose } from "@/components/ui/sheet";
 import { useDebugStore } from "@/store/debugStore";
+import { useDrawerActions } from "@/hooks/useDrawerActions";
+import { useLogAddressLabels } from "@/hooks/useCallTreeAddressLabels";
 import { getEvLocal, lookupSignature4Byte, decodeLogEntry } from "@/lib/fourbyteUtils";
 import { toast } from "sonner";
-import { Search, Loader2, ExternalLink } from "lucide-react";
+import { Search, Loader2, ExternalLink, ScrollText, X } from "lucide-react";
 
 interface GlobalLogEntry {
   address: string;
@@ -13,6 +16,7 @@ interface GlobalLogEntry {
   stepIndex: number;
   contextId: number;
   frameAddress: string;
+  transactionId?: number;
 }
 
 interface Props {
@@ -40,10 +44,17 @@ const STRIPE_COLORS = [
   'bg-rose-500',
 ];
 
+/** 稳定引用，避免 `isOpen ? allLogs : []` 每次渲染新 [] 导致 useLogAddressLabels 死循环 */
+const EMPTY_LOG_ENTRIES: GlobalLogEntry[] = [];
+
 export function GlobalLogDrawer({ onSeekTo }: Props) {
   const isOpen = useDebugStore((s) => s.isLogDrawerOpen);
+  const { closeLog } = useDrawerActions();
   const callFrames = useDebugStore((s) => s.callFrames);
+  const txBoundaries = useDebugStore((s) => s.txBoundaries);
   const scanUrl = useDebugStore((s) => s.config.scanUrl);
+  const chainId = useDebugStore((s) => s.currentDebugChainId);
+  const showLogTxColumn = Boolean(txBoundaries && txBoundaries.length > 0);
 
   const [scrollEl, setScrollEl] = useState<HTMLDivElement | null>(null);
   const scrollElRef = useRef<HTMLDivElement | null>(null);
@@ -61,9 +72,19 @@ export function GlobalLogDrawer({ onSeekTo }: Props) {
         ...l,
         contextId: f.contextId,
         frameAddress: f.address ?? '',
+        transactionId: l.transactionId,
       })))
       .sort((a, b) => a.stepIndex - b.stepIndex),
     [callFrames]
+  );
+
+  const logsForAddressLabels = useMemo(
+    () => (isOpen ? allLogs : EMPTY_LOG_ENTRIES),
+    [isOpen, allLogs],
+  );
+  const { labels: addressLabels } = useLogAddressLabels(
+    logsForAddressLabels,
+    chainId,
   );
 
   useEffect(() => {
@@ -107,10 +128,13 @@ export function GlobalLogDrawer({ onSeekTo }: Props) {
     return () => cancelAnimationFrame(id1);
   }, [isOpen]);
 
+  const logsPerRow = 2;
+  const rowCount = Math.ceil(allLogs.length / logsPerRow);
+
   const virtualizer = useVirtualizer({
-    count: virtualizerReady ? allLogs.length : 0,
+    count: virtualizerReady ? rowCount : 0,
     getScrollElement: () => scrollElRef.current,
-    estimateSize: () => 160,
+    estimateSize: () => 96,
     overscan: 5,
   });
 
@@ -122,171 +146,174 @@ export function GlobalLogDrawer({ onSeekTo }: Props) {
     return () => ro.disconnect();
   }, [scrollEl]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => { virtualizer.measure(); }, [resolvedEvents]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { virtualizer.measure(); }, [resolvedEvents, addressLabels]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
-    <Sheet
+    <BottomSheetShell
       open={isOpen}
-      onOpenChange={(o) => { if (!o) useDebugStore.getState().sync({ isLogDrawerOpen: false }); }}
+      onOpenChange={(o) => { if (!o) closeLog(); }}
+      sheetTitle="All Logs"
+      defaultHeightVh={55}
     >
-      <SheetContent
-        side="bottom"
-        className="h-[55vh] flex flex-col p-0 [&>button]:hidden border-t border-border shadow-[0_-4px_16px_rgba(0,0,0,0.22)]"
-        aria-describedby={undefined}
-      >
-        <SheetTitle className="sr-only">All Logs</SheetTitle>
-
-        {/* ── header ── */}
-        <div className="flex items-center justify-between px-4 py-2 border-b bg-muted/60 flex-shrink-0">
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-semibold tracking-wide">Event Logs</span>
-            <span className="text-[10px] font-mono bg-muted border rounded px-1.5 py-0.5 text-muted-foreground">
+        <div className="flex flex-nowrap items-center justify-between gap-x-1.5 border-b border-border bg-muted/60 px-2 py-1 text-[11px] shrink-0">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <ScrollText className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden />
+            <span className="shrink-0 font-semibold tracking-wide text-foreground">Event Logs</span>
+            <span className="inline-flex h-5 shrink-0 items-center justify-center rounded border border-border bg-muted px-1.5 font-mono text-[10px] tabular-nums leading-tight text-muted-foreground">
               {allLogs.length}
             </span>
           </div>
-          <button
-            className="text-muted-foreground hover:text-foreground text-lg leading-none px-1 transition-colors"
-            onClick={() => useDebugStore.getState().sync({ isLogDrawerOpen: false })}
-          >
-            ×
-          </button>
+          <SheetClose className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none data-[state=open]:bg-secondary">
+            <X className="h-3 w-3" />
+            <span className="sr-only">Close</span>
+          </SheetClose>
         </div>
 
-        {/* ── list ── */}
-        <div ref={parentRef} className="overflow-auto" style={{ height: 'calc(55vh - 37px)', minHeight: 0 }}>
+        <div ref={parentRef} className="flex-1 min-h-0 overflow-auto">
           {allLogs.length === 0 ? (
             <div className="p-8 text-center text-muted-foreground text-sm">No logs emitted</div>
           ) : (
             <div style={{ height: `${virtualizer.getTotalSize()}px`, width: "100%", position: "relative" }}>
               {virtualizer.getVirtualItems().map((vRow) => {
-                const log = allLogs[vRow.index];
-                const logNum = vRow.index;
-                const topic0 = log.topics[0];
-                const evName = topic0 ? (resolvedEvents[topic0] ?? getEvLocal(topic0)) : undefined;
-                const decoded = evName ? decodeLogEntry(evName, log.topics, log.data) : null;
-                const contractAddr = log.address || log.frameAddress;
-                const stripe = STRIPE_COLORS[logNum % STRIPE_COLORS.length];
-
-                // Build topic rows: if decoded, first topic is signature hash (skip for display),
-                // remaining topics map to indexed args
-                const indexedArgs = decoded?.args.filter(a => a.indexed) ?? [];
-                const nonIndexedArgs = decoded?.args.filter(a => !a.indexed) ?? [];
-
+                const leftIdx = vRow.index * logsPerRow;
+                const pair = allLogs.slice(leftIdx, leftIdx + logsPerRow);
                 return (
                   <div
                     key={vRow.index}
                     ref={virtualizer.measureElement}
                     data-index={vRow.index}
                     style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${vRow.start}px)` }}
-                    className="border-b border-border/60 hover:bg-muted/30 transition-colors"
+                    className="border-b border-border/50"
                   >
-                    <div className="flex min-h-0">
-                      {/* coloured left stripe + log index */}
-                      <div className={`w-1 flex-shrink-0 ${stripe}`} />
-                      <div className="flex-shrink-0 w-10 flex items-start justify-center pt-3">
-                        <span className="text-[10px] font-mono text-muted-foreground tabular-nums">{logNum}</span>
-                      </div>
-
-                      {/* main content */}
-                      <div className="flex-1 min-w-0 py-2.5 pr-3 font-mono text-[11px]">
-
-                        {/* ── row: Address ── */}
-                        <div className="flex items-center gap-2 mb-1.5">
-                          <span className="text-muted-foreground w-14 flex-shrink-0 text-right text-[10px]">Address</span>
-                          <span
-                            className="text-sky-500 hover:text-sky-300 cursor-pointer transition-colors flex items-center gap-0.5"
-                            title={`Open ${contractAddr} in explorer`}
-                            onClick={() => openScanAddress(scanUrl, contractAddr)}
-                          >
-                            {contractAddr}
-                            <ExternalLink className="h-2.5 w-2.5 opacity-60" />
-                          </span>
-                          <span className="text-muted-foreground/50 text-[10px]">Frame:{log.contextId}</span>
-                          {onSeekTo && (
-                            <span
-                              className="text-[10px] font-mono text-blue-500 hover:text-blue-300 cursor-pointer transition-colors tabular-nums"
-                              onClick={() => onSeekTo(log.stepIndex)}
-                              title={`Seek to step ${log.stepIndex}`}
-                            >
-                              {"-> " +  log.stepIndex}
-                            </span>
-                          )}
-                        </div>
-
-                        {/* ── row: Name ── */}
-                        <div className="flex items-start gap-2 mb-1.5">
-                          <span className="text-muted-foreground w-14 flex-shrink-0 text-right text-[10px] pt-px">Name</span>
-                          {evName ? (
-                            <span className="text-amber-400 font-semibold break-all">{evName}</span>
-                          ) : topic0 ? (
-                            <div className="flex items-center gap-1.5">
-                              <span className="text-muted-foreground/60 italic text-[10px]">Unknown event</span>
-                              <button
-                                className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground border border-border rounded px-1.5 py-0.5 transition-colors disabled:opacity-40"
-                                onClick={() => handleEventLookup(topic0)}
-                                disabled={lookingUp === topic0}
-                              >
-                                {lookingUp === topic0
-                                  ? <><Loader2 className="h-2.5 w-2.5 animate-spin" /> Looking up…</>
-                                  : <><Search className="h-2.5 w-2.5" /> Lookup</>
-                                }
-                              </button>
-                            </div>
-                          ) : (
-                            <span className="text-muted-foreground/50 italic text-[10px]">Anonymous (no topics)</span>
-                          )}
-                        </div>
-
-                        {/* ── Topics ── */}
-                        {log.topics.length > 0 && (
-                          <div className="flex items-start gap-2 mb-1">
-                            <span className="text-muted-foreground w-14 flex-shrink-0 text-right text-[10px] pt-px">Topics</span>
-                            <div className="flex flex-col gap-0.5 min-w-0 flex-1">
-                              {log.topics.map((topic, ti) => {
-                                const isSignature = ti === 0;
-                                const indexedArg = !isSignature ? indexedArgs[ti - 1] : undefined;
-                                return (
-                                  <div key={ti} className="flex items-baseline gap-1.5 min-w-0">
-                                    <span className="text-[10px] text-muted-foreground/60 flex-shrink-0 w-4 text-right">[{ti}]</span>
-                                    {isSignature ? (
-                                      <span className="text-foreground break-all">{topic}</span>
-                                    ) : indexedArg ? (
-                                      <span className="min-w-0 break-all">
-                                        <span className="text-foreground break-all">{indexedArg.value}</span>
-                                        <span className="text-muted-foreground/50 ml-1 text-[10px]">{indexedArg.type}</span>
+                    <div className="grid grid-cols-2 gap-x-1 gap-y-2 px-1.5 py-1">
+                      {pair.map((log, idxInRow) => {
+                        const logNum = leftIdx + idxInRow;
+                        const topic0 = log.topics[0];
+                        const evName = topic0 ? (resolvedEvents[topic0] ?? getEvLocal(topic0)) : undefined;
+                        const decoded = evName ? decodeLogEntry(evName, log.topics, log.data) : null;
+                        const contractAddr = log.address || log.frameAddress;
+                        const addrLabelItem = addressLabels[contractAddr.trim().toLowerCase()];
+                        const addrLabelText =
+                          addrLabelItem && (addrLabelItem.name || addrLabelItem.label || "").trim();
+                        const stripe = STRIPE_COLORS[logNum % STRIPE_COLORS.length];
+                        const indexedArgs = decoded?.args.filter(a => a.indexed) ?? [];
+                        const nonIndexedArgs = decoded?.args.filter(a => !a.indexed) ?? [];
+                        return (
+                          <div key={logNum} className="min-w-0 rounded border border-border/50 bg-muted/10">
+                            <div className="flex min-h-0">
+                              <div className={`w-0.5 flex-shrink-0 rounded-l ${stripe}`} />
+                              <div className="flex-shrink-0 w-6 flex items-center justify-center py-0.5">
+                                <span className="text-[9px] font-mono text-muted-foreground tabular-nums leading-none">{logNum}</span>
+                              </div>
+                              <div className="flex-1 min-w-0 py-0.5 pr-1 font-mono text-[10px] leading-tight">
+                                {/* 左列：地址紧贴事件/topics；右列仅 frame/step，避免把事件名顶到地址下方很远 */}
+                                <div className="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-1 gap-y-0">
+                                  <div className="min-w-0 flex flex-col gap-0">
+                                    <div className="flex flex-wrap items-center gap-x-1 gap-y-0.5">
+                                      <span
+                                        className="text-sky-500 hover:text-sky-300 cursor-pointer transition-colors break-all inline-flex flex-wrap items-center gap-0.5"
+                                        title={`Open ${contractAddr} in explorer`}
+                                        onClick={() => openScanAddress(scanUrl, contractAddr)}
+                                      >
+                                        {contractAddr}
+                                        <ExternalLink className="h-2.5 w-2.5 opacity-60 shrink-0 self-center" />
                                       </span>
-                                    ) : (
-                                      <span className="text-foreground break-all">{topic}</span>
-                                    )}
+                                      {addrLabelText ? (
+                                        <span
+                                          className="inline-flex items-center font-mono flex-shrink-0 rounded-sm border border-border/70 bg-muted/40 px-1 py-0 leading-none text-[9px] text-foreground"
+                                          title={addrLabelText}
+                                        >
+                                          {addrLabelText}
+                                        </span>
+                                      ) : null}
+                                    </div>
+
+                                <div className="space-y-0 min-w-0 mt-0">
+                                  {evName ? (
+                                    <span className="text-violet-600 dark:text-violet-300 font-medium break-all leading-tight block">{evName}</span>
+                                  ) : topic0 ? (
+                                    <div className="flex items-center gap-1">
+                                      <span className="text-muted-foreground/60 italic text-[10px]">Unknown</span>
+                                      <button
+                                        className="flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground border border-border rounded px-1 py-0 transition-colors disabled:opacity-40"
+                                        onClick={() => handleEventLookup(topic0)}
+                                        disabled={lookingUp === topic0}
+                                      >
+                                        {lookingUp === topic0 ? <Loader2 className="h-2.5 w-2.5 animate-spin" /> : <Search className="h-2.5 w-2.5" />}
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <span className="text-muted-foreground/50 italic text-[10px]">Anonymous</span>
+                                  )}
+
+                                {log.topics.length > 0 && (
+                                  <div className="min-w-0">
+                                    <div className="flex flex-col gap-0 min-w-0">
+                                      {log.topics.map((topic, ti) => {
+                                        const isSignature = ti === 0;
+                                        const indexedArg = !isSignature ? indexedArgs[ti - 1] : undefined;
+                                        return (
+                                          <div key={ti} className="flex items-baseline gap-1 min-w-0 leading-tight py-px">
+                                            <span className="text-[9px] text-muted-foreground/60 flex-shrink-0 w-3.5 text-right">[{ti}]</span>
+                                            {isSignature ? (
+                                              <span className="text-foreground break-all">{topic}</span>
+                                            ) : indexedArg ? (
+                                              <span className="min-w-0 break-all">
+                                                <span className="text-foreground break-all">{indexedArg.value}</span>
+                                                <span className="text-muted-foreground/50 ml-1 text-[10px]">{indexedArg.type}</span>
+                                              </span>
+                                            ) : (
+                                              <span className="text-foreground break-all">{topic}</span>
+                                            )}
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
                                   </div>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        )}
+                                )}
 
-                        {/* ── Data ── */}
-                        {nonIndexedArgs.length > 0 ? (
-                          <div className="flex items-start gap-2">
-                            <span className="text-muted-foreground w-14 flex-shrink-0 text-right text-[10px] pt-px">Data</span>
-                            <div className="flex flex-col gap-0.5 min-w-0 flex-1">
-                              {nonIndexedArgs.map((arg, i) => (
-                                <div key={i} className="flex items-baseline gap-1.5">
-                                  <span className="text-[10px] text-muted-foreground/60 flex-shrink-0 w-4 text-right">[{i}]</span>
-                                  <span className="text-foreground break-all">{arg.value}</span>
-                                  <span className="text-muted-foreground/50 text-[10px]">{arg.type}</span>
+                                {nonIndexedArgs.length > 0 ? (
+                                  <div className="min-w-0">
+                                    <div className="flex flex-col gap-0 min-w-0">
+                                      {nonIndexedArgs.map((arg, i) => (
+                                        <div key={i} className="flex items-baseline gap-1 min-w-0 leading-tight py-px">
+                                          <span className="text-[9px] text-muted-foreground/60 flex-shrink-0 w-3.5 text-right">[{i}]</span>
+                                          <span className="text-foreground break-all">{arg.value}</span>
+                                          <span className="text-muted-foreground/50 text-[10px]">{arg.type}</span>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                ) : log.data && log.data !== '0x' ? (
+                                  <div className="min-w-0">
+                                    <span className="text-foreground break-all">{log.data}</span>
+                                  </div>
+                                ) : null}
                                 </div>
-                              ))}
+                                  </div>
+
+                                  <div className="flex flex-col items-end gap-px shrink-0 self-start text-right leading-tight pl-0.5">
+                                    <span className="text-[9px] text-muted-foreground/80 tabular-nums whitespace-nowrap">
+                                      {showLogTxColumn && log.transactionId !== undefined
+                                        ? `Tx${log.transactionId + 1}#${log.contextId}`
+                                        : `F${log.contextId}`}
+                                    </span>
+                                    {onSeekTo ? (
+                                      <span
+                                        className="text-[9px] font-mono text-blue-500 hover:text-blue-300 cursor-pointer transition-colors tabular-nums whitespace-nowrap"
+                                        onClick={() => onSeekTo(log.stepIndex)}
+                                        title={`Seek to step ${log.stepIndex}`}
+                                      >
+                                        step {log.stepIndex}
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                </div>
+                              </div>
                             </div>
                           </div>
-                        ) : log.data && log.data !== '0x' ? (
-                          <div className="flex items-start gap-2">
-                            <span className="text-muted-foreground w-14 flex-shrink-0 text-right text-[10px] pt-px">Data</span>
-                            <span className="text-foreground break-all">{log.data}</span>
-                          </div>
-                        ) : null}
-
-                      </div>
+                        );
+                      })}
                     </div>
                   </div>
                 );
@@ -294,7 +321,6 @@ export function GlobalLogDrawer({ onSeekTo }: Props) {
             </div>
           )}
         </div>
-      </SheetContent>
-    </Sheet>
+    </BottomSheetShell>
   );
 }

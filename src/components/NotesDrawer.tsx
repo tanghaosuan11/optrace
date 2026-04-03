@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from "react";
-import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
+import { BottomSheetShell } from "@/components/ui/bottom-sheet-shell";
 import { useDebugStore, type ValueRecord, type StepMark } from "@/store/debugStore";
+import { useDrawerActions } from "@/hooks/useDrawerActions";
 import { OP_MAP } from "@/lib/opcodes";
 import { X, Trash2, StickyNote } from "lucide-react";
 import { toast } from "sonner";
@@ -9,14 +10,12 @@ interface NotesDrawerProps {
   onSeekTo?: (index: number) => void;
 }
 
-/* ── 类型图标 + 颜色 ─────────────────────────────────── */
 const SOURCE_STYLE: Record<string, { icon: string; color: string }> = {
   stack:   { icon: "S", color: "bg-blue-500/80" },
   memory:  { icon: "M", color: "bg-orange-500/80" },
   storage: { icon: "K", color: "bg-emerald-500/80" },
 };
 
-/* ── 来源描述 ─────────────────────────────────────── */
 function sourceLabel(src: ValueRecord["source"]): string {
   switch (src.type) {
     case "stack":   return `Stack[${src.depth}]`;
@@ -25,7 +24,6 @@ function sourceLabel(src: ValueRecord["source"]): string {
   }
 }
 
-/* ── 可行编辑备注 ─────────────────────────────────── */
 function InlineNote({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(value);
@@ -60,7 +58,6 @@ function InlineNote({ value, onChange }: { value: string; onChange: (v: string) 
   );
 }
 
-/* ── 值记录卡片 ─────────────────────────────────── */
 function ValueCard({ record, onSeekTo }: { record: ValueRecord; onSeekTo?: (i: number) => void }) {
   const { removeValueRecord, updateValueRecordNote } = useDebugStore.getState();
   const s = SOURCE_STYLE[record.source.type];
@@ -101,7 +98,6 @@ function ValueCard({ record, onSeekTo }: { record: ValueRecord; onSeekTo?: (i: n
   );
 }
 
-/* ── 步数标记卡片 ─────────────────────────────────── */
 function StepCard({ mark, onSeekTo }: { mark: StepMark; onSeekTo?: (i: number) => void }) {
   const { removeStepMark, updateStepMarkNote } = useDebugStore.getState();
 
@@ -135,26 +131,19 @@ function StepCard({ mark, onSeekTo }: { mark: StepMark; onSeekTo?: (i: number) =
   );
 }
 
-/* ── 主组件 ─────────────────────────────────────── */
 export function NotesDrawer({ onSeekTo }: NotesDrawerProps) {
   const isOpen = useDebugStore((s) => s.isNotesDrawerOpen);
   const valueRecords = useDebugStore((s) => s.valueRecords);
   const stepMarks = useDebugStore((s) => s.stepMarks);
-
-  const close = () => useDebugStore.getState().sync({ isNotesDrawerOpen: false });
+  const { closeNotes: close } = useDrawerActions();
 
   return (
-    <Sheet
+    <BottomSheetShell
       open={isOpen}
       onOpenChange={(o) => { if (!o) close(); }}
+      sheetTitle="Notes"
+      defaultHeightVh={45}
     >
-      <SheetContent
-        side="bottom"
-        className="h-[45vh] flex flex-col p-0 [&>button]:hidden border-t border-border shadow-[0_-4px_16px_rgba(0,0,0,0.22)]"
-        aria-describedby={undefined}
-      >
-        <SheetTitle className="sr-only">Notes</SheetTitle>
-
         {/* Header */}
         <div className="flex items-center px-4 py-1.5 border-b bg-muted/60 flex-shrink-0">
           <StickyNote size={13} className="mr-1.5 text-muted-foreground" />
@@ -204,12 +193,10 @@ export function NotesDrawer({ onSeekTo }: NotesDrawerProps) {
             </div>
           </div>
         </div>
-      </SheetContent>
-    </Sheet>
+    </BottomSheetShell>
   );
 }
 
-/* ── Helper: 在其他组件中快速添加记录 ─────────────────── */
 export function addValueRecordFromStack(stepIndex: number, depth: number, value: string) {
   useDebugStore.getState().addValueRecord({
     stepIndex, note: "", source: { type: "stack", depth, value },

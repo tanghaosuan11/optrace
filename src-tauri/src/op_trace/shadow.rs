@@ -1,7 +1,5 @@
-//! EVM 数据流追踪：Shadow Stack + Shadow Memory + Shadow Storage
-//!
-//! 在 Inspector 的 step/call/call_end 回调中同步维护影子状态，
-//! 构建全局 DataNode 图，支持 backward_slice 查询。
+//! EVM 数据流追踪（Shadow Stack / Memory / Storage）。
+//! 在 Inspector 回调里维护影子状态，构建 DataNode 图，供 backward_slice 查询。
 
 use revm::primitives::{Address, U256};
 use serde::Serialize;
@@ -15,22 +13,22 @@ pub type NodeId = u32;
 pub const NO_NODE: NodeId = u32::MAX;
 
 
-/// 数据流图中的一个节点，代表某步产生的数据
+/// 数据流节点
 #[derive(Clone)]
 pub struct DataNode {
     /// 全局 step 索引
     pub global_step: u32,
     pub pc: u32,
     pub opcode: u8,
-    /// 产生此数据的源节点
+    /// 来源节点
     pub parents: Vec<NodeId>,
 }
 
 
-/// 用于发送到前端的节点信息
+/// 前端展示节点
 #[derive(Serialize, Clone)]
 pub struct DataNodeInfo {
-    /// 节点 ID
+    /// 节点 id
     pub id: u32,
     /// 全局步骤索引
     pub global_step: u32,
@@ -42,22 +40,24 @@ pub struct DataNodeInfo {
     pub opcode_name: String,
     /// 父节点 ID 列表
     pub parent_ids: Vec<u32>,
-    /// 该节点所在 step 执行后的栈值（若能定位到该节点在栈中的位置）
+    /// 执行后栈值（可定位时）
     pub stack_value_post: Option<String>,
 }
 
-/// 数据流树
+/// 数据流树结果
 #[derive(Serialize)]
 pub struct DataFlowTree {
-    /// 查询起点的节点 ID
+    /// 查询起点 id
     pub root_id: u32,
-    /// 所有节点
+    /// 结果节点列表
     pub nodes: Vec<DataNodeInfo>,
 }
 
 #[derive(Serialize, Clone)]
 pub struct ShadowValidationMismatch {
     pub step: u32,
+    /// 多笔调试时与 frame_id 联合定位
+    pub transaction_id: Option<u32>,
     pub frame_id: Option<u16>,
     pub opcode: u8,
     pub opcode_name: String,
@@ -76,29 +76,20 @@ pub struct ShadowValidationReport {
     pub mismatches: Vec<ShadowValidationMismatch>,
 }
 
-/// 每个 call frame 的独立影子状态
+/// 单个 call frame 的影子状态
 #[derive(Clone)]
 struct ShadowFrame {
-    /// 影子栈：镜像 EVM 栈，存 NodeId 而非 U256
+    /// 影子栈（存 NodeId）
     shadow_stack: Vec<NodeId>,
-    /// 影子内存：EVM 线性内存模型，按需扩展但有上限
-    /// 遵循 EVM 内存算法：访问会自动扩展，超过上限则不记录
+    /// 影子内存（按需扩展，带上限）
     shadow_memory: Vec<NodeId>,
-    /// calldata 的影子：按字节索引存 NodeId
+    /// calldata 影子（按字节索引）
     calldata_shadow: Vec<NodeId>,
-    /// RETURN/REVERT 前保存的返回数据影子
+    /// RETURN/REVERT 前缓存的返回数据影子
     prepared_return_shadow: Vec<NodeId>,
 }
 
-/// 合理的内存偏移上限：4 MB
-/// 
-/// 在 EVM gas 限制下，实际可达到的内存远小于这个值。
-/// 超过此值的内存操作是不现实的，应该被完全忽略（不污染数据流）。
-/// 
-/// 计算理由：
-/// - EVM 内存成本：3 gas + 1/32 gas 每 32 bytes（二次定价）
-/// - 1000 万 gas（一整个区块）最多可扩展 ~1000 万字节内存
-/// - 4MB 是保守的现实上限，留有充足的缓冲
+/// 内存偏移上限（4MB），超出后忽略。
 const MAX_REASONABLE_MEMORY_OFFSET: usize = 4 * 1024 * 1024;
 
 impl ShadowFrame {
@@ -121,10 +112,10 @@ impl ShadowFrame {
     }
 }
 
-/// 全局影子状态，贯穿整个交易执行
+/// 全局影子状态（贯穿整个执行过程）
 #[derive(Clone)]
 pub struct ShadowState {
-    /// 所有数据流节点
+    /// 数据流节点
     nodes: Vec<DataNode>,
     /// 调用帧栈
     frames: Vec<ShadowFrame>,
@@ -132,32 +123,34 @@ pub struct ShadowState {
     shadow_storage: HashMap<(Address, U256), NodeId>,
     /// 瞬态 storage 影子
     shadow_transient: HashMap<(Address, U256), NodeId>,
-    /// 上一次 call 返回的数据影子，供 RETURNDATACOPY 使用
+    /// 上次 call 的返回数据影子（RETURNDATACOPY 用）
     return_data_shadow: Vec<NodeId>,
-    /// 下一次 push_frame 使用的 calldata 影子（在 on_step(CALL/CREATE) 中预计算）
+    /// 下一次 push_frame 使用的 calldata 影子
     pending_calldata_shadow: Option<Vec<NodeId>>,
-    /// 待在 pop_frame 时回填到父帧栈顶的返回节点栈（支持嵌套 CALL/CREATE）
-    /// 元素为 (call_or_create_node_id, origin_step)
+    /// pop_frame 时回填父帧栈顶的返回节点
+    /// 元素: (call_or_create_node_id, origin_step)
     pending_ret_stack: Vec<(NodeId, u32)>,
-    /// global_step -> NodeId 映射，用于 backward_slice 查询
+    /// global_step -> NodeId
     step_node_map: Vec<NodeId>,
-    /// global_step -> 影子栈快照，用于根据 stack_depth 查询
+    /// global_step -> 影子栈快照
     step_stack_snapshots: HashMap<u32, Vec<NodeId>>,
-    /// global_step -> 执行前影子栈快照（on_step 入口）
+    /// global_step -> 执行前影子栈快照
     step_stack_snapshots_pre: HashMap<u32, Vec<NodeId>>,
-    /// global_step -> frame_depth（当前 frame 栈深），用于区分跨帧问题
+    /// global_step -> frame_depth
     step_frame_depths: HashMap<u32, usize>,
     /// global_step -> frame_id/context_id
     step_frame_ids: HashMap<u32, u16>,
-    /// global_step -> EVM栈快照（执行前，原始 U256）
+    /// global_step -> transaction_id
+    step_transaction_ids: HashMap<u32, u32>,
+    /// global_step -> 执行前 EVM 栈快照
     step_evm_stacks: HashMap<u32, Vec<U256>>,
-    /// global_step -> step_end 后 EVM 栈快照（执行后，原始 U256）
+    /// global_step -> 执行后 EVM 栈快照
     step_evm_stacks_post: HashMap<u32, Vec<U256>>,
     /// 调试日志文件路径
     debug_log_path: PathBuf,
-    /// 导出/调试临时文件目录
+    /// 导出/调试临时目录
     temp_dir: PathBuf,
-    /// 是否启用调试日志文件写入
+    /// 是否写调试日志
     enable_debug_log: bool,
 }
 
@@ -193,25 +186,26 @@ impl ShadowState {
             step_stack_snapshots_pre: HashMap::new(),
             step_frame_depths: HashMap::new(),
             step_frame_ids: HashMap::new(),
+            step_transaction_ids: HashMap::new(),
             step_evm_stacks: HashMap::new(),
             step_evm_stacks_post: HashMap::new(),
             debug_log_path,
             temp_dir,
-            enable_debug_log: enable_debug_log, // 默认启用调试日志
+            enable_debug_log: enable_debug_log,
         }
     }
     
-    /// 设置是否启用调试日志文件写入
+    /// 设置调试日志开关
     pub fn set_debug_log_enabled(&mut self, enabled: bool) {
         self.enable_debug_log = enabled;
     }
     
-    /// 获取调试日志是否启用
+    /// 获取调试日志开关
     pub fn is_debug_log_enabled(&self) -> bool {
         self.enable_debug_log
     }
     
-    /// 辅助方法：写入调试日志（带自动 flush）
+    /// 写入调试日志（自动 flush）
     fn debug_log(&self, msg: &str) {
         if !self.enable_debug_log {
             return;
@@ -221,8 +215,6 @@ impl ShadowState {
             let _ = file.flush();  // 立刻刷新到磁盘
         }
     }
-
-    // ── 内部工具 ──────────────────────────────────────────────────────────
 
     fn current_frame(&self) -> &ShadowFrame {
         self.frames.last().expect("shadow: no frame")
@@ -370,8 +362,6 @@ impl ShadowState {
         }
     }
 
-    // ── 主入口：on_step ──────────────────────────────────────────────────
-
     /// 在 Inspector::step() 中调用（opcode 执行前）
     ///
     /// - `opcode`: 当前指令
@@ -387,6 +377,7 @@ impl ShadowState {
         stack: &[U256],
         address: Address,
         frame_id: u16,
+        transaction_id: u32,
     ) {
         let gs = global_step as u32;
         let pc32 = pc as u32;
@@ -422,7 +413,7 @@ impl ShadowState {
         // CALL/CREATE 返回值在 pop_frame 中推入父帧栈顶
 
         let node_id = match opcode {
-            // ── 二元运算：pop 2, push 1 ────────────────────────────────
+            // binary (pop 2, push 1)
             0x01..=0x07 | 0x0a | 0x0b | 0x10..=0x14 | 0x16..=0x18 | 0x1a..=0x1d => {
                 let a = self.pop_shadow();
                 let b = self.pop_shadow();
@@ -431,7 +422,7 @@ impl ShadowState {
                 nid
             }
 
-            // ── 三元运算：ADDMOD(0x08), MULMOD(0x09) → pop 3, push 1 ──
+            // ternary: ADDMOD/MULMOD (pop 3, push 1)
             0x08 | 0x09 => {
                 let a = self.pop_shadow();
                 let b = self.pop_shadow();
@@ -441,7 +432,7 @@ impl ShadowState {
                 nid
             }
 
-            // ── 一元运算：ISZERO(0x15), NOT(0x19) → pop 1, push 1 ─────
+            // unary: ISZERO/NOT (pop 1, push 1)
             0x15 | 0x19 => {
                 let a = self.pop_shadow();
                 let nid = self.alloc_node(gs, pc32, opcode, vec![a]);
@@ -449,7 +440,7 @@ impl ShadowState {
                 nid
             }
 
-            // ── KECCAK256(0x20) → pop 2 (offset, size), push 1 ────────
+            // KECCAK256: pop 2, push 1; depends on memory
             // 结果依赖内存内容
             0x20 => {
                 let offset_n = self.pop_shadow();
@@ -463,7 +454,7 @@ impl ShadowState {
                 nid
             }
 
-            // ── 环境常量：pop 0, push 1（无 parents，是叶子节点） ──────
+            // environment leaf nodes (pop 0, push 1)
             0x30 | // ADDRESS
             0x32 | // ORIGIN
             0x33 | // CALLER
@@ -491,16 +482,14 @@ impl ShadowState {
                 nid
             }
 
-            // ── PUSH1..PUSH32 (0x60..0x7f) → push constant ────────────
+            // PUSH1..PUSH32: push constant leaf
             0x60..=0x7f => {
                 let nid = self.alloc_node(gs, pc32, opcode, vec![]);
                 self.push_shadow(nid);
                 nid
             }
 
-            // ── 环境读取 (pop 1, push 1) ───────────────────────────────
-            // BALANCE(0x31), EXTCODESIZE(0x3b), EXTCODEHASH(0x3f),
-            // BLOCKHASH(0x40), BLOBHASH(0x49)
+            // environment reads: BALANCE/EXTCODESIZE/EXTCODEHASH/BLOCKHASH/BLOBHASH (pop 1, push 1)
             0x31 | 0x3b | 0x3f | 0x40 | 0x49 => {
                 let a = self.pop_shadow();
                 let nid = self.alloc_node(gs, pc32, opcode, vec![a]);
@@ -508,7 +497,7 @@ impl ShadowState {
                 nid
             }
 
-            // ── CALLDATALOAD(0x35) → pop 1 (offset), push 1 ───────────
+            // CALLDATALOAD: pop 1, push 1; depends on calldata
             // 结果依赖 calldata 内容
             0x35 => {
                 let offset_n = self.pop_shadow();
@@ -520,7 +509,7 @@ impl ShadowState {
                 nid
             }
 
-            // ── CALLDATACOPY(0x37) → pop 3, push 0, 写内存 ────────────
+            // CALLDATACOPY: pop 3, write memory
             0x37 => {
                 let dest_n = self.pop_shadow();
                 let offset_n = self.pop_shadow();
@@ -537,7 +526,7 @@ impl ShadowState {
                 nid
             }
 
-            // ── CODECOPY(0x39) → pop 3, push 0, 写内存 ────────────────
+            // CODECOPY: pop 3, write memory
             0x39 => {
                 let dest_n = self.pop_shadow();
                 let offset_n = self.pop_shadow();
@@ -551,7 +540,7 @@ impl ShadowState {
                 nid
             }
 
-            // ── EXTCODECOPY(0x3c) → pop 4, push 0, 写内存 ────────────
+            // EXTCODECOPY: pop 4, write memory
             0x3c => {
                 let addr_n = self.pop_shadow();
                 let dest_n = self.pop_shadow();
@@ -566,8 +555,7 @@ impl ShadowState {
                 nid
             }
 
-            // ── RETURNDATACOPY(0x3e) → pop 3, push 0, 写内存 ─────────
-            // 读 return data 的影子
+            // RETURNDATACOPY: pop 3, push 0, write memory from return data
             0x3e => {
                 let dest_n = self.pop_shadow();
                 let offset_n = self.pop_shadow();
@@ -593,13 +581,13 @@ impl ShadowState {
                 nid
             }
 
-            // ── POP(0x50) → pop 1, push 0 ─────────────────────────────
+            // POP: pop 1
             0x50 => {
                 self.pop_shadow();
                 NO_NODE
             }
 
-            // ── MLOAD(0x51) → pop 1 (offset), push 1 ─────────────────
+            // MLOAD: pop 1, push 1
             0x51 => {
                 // EVM 栈语义：stack[0] = offset（执行前）
                 let offset = Self::stack_val(stack, 0);  // 先读 offset 值（执行前）
@@ -626,7 +614,7 @@ impl ShadowState {
                 nid
             }
 
-            // ── MSTORE(0x52) → pop 2, push 0, 写 32 字节 ────────────
+            // MSTORE: pop 2, write 32 bytes
             0x52 => {
                 // EVM 栈语义：stack[0] = offset（栈顶），stack[1] = value（栈次）
                 let offset = Self::stack_val(stack, 0); // 先读 offset 值（执行前）
@@ -637,20 +625,22 @@ impl ShadowState {
                 if self.enable_debug_log {
                     self.debug_log(&format!("[shadow.MSTORE] pop value_n={}, offset_n={}", value_n, offset_n));
                     self.debug_log(&format!("[shadow.MSTORE] offset=0x{:x}, value_n={}", offset, value_n));
-                    self.debug_log(&format!("[shadow.MSTORE] 将 value_n={} 写入内存[0x{:x}..0x{:x}]", value_n, offset, offset.saturating_add(32)));
+                    self.debug_log(&format!("[shadow.MSTORE] 将 nid 写入内存[0x{:x}..0x{:x}]", offset, offset.saturating_add(32)));
                 }
                 
-                // 规范正确做法：只把 value_n 本身写入内存（不创建 MSTORE 节点）
-                self.memory_write(offset, 32, value_n);
+                // 创建 MSTORE 节点，使其在 backward_slice 中可见（step_node_map 有记录）
+                // 写 nid 而非裸 value_n，保留完整链式引用：value_n → MSTORE_nid → 内存 → MLOAD
+                let nid = self.alloc_node(gs, pc32, opcode, vec![offset_n, value_n]);
+                self.memory_write(offset, 32, nid);
                 
                 if self.enable_debug_log {
-                    self.debug_log(&format!("[shadow.MSTORE] 完成: memory[0x{:x}] := nid({})", offset, value_n));
+                    self.debug_log(&format!("[shadow.MSTORE] 完成: memory[0x{:x}] := nid({})", offset, nid));
                 }
                 
-                NO_NODE  // MSTORE 不产生栈输出
+                nid  // MSTORE 自身节点写入 step_node_map，backward_slice 可追溯
             }
 
-            // ── MSTORE8(0x53) → pop 2, push 0, 写 1 字节 ────────────
+            // MSTORE8: pop 2, write 1 byte
             0x53 => {
                 // 同 MSTORE，stack[0] = offset，stack[1] = value
                 let offset = Self::stack_val(stack, 0);
@@ -659,19 +649,20 @@ impl ShadowState {
                 
                 if self.enable_debug_log {
                     self.debug_log(&format!("[shadow.MSTORE8] pop value_n={}, offset_n={}", value_n, offset_n));
-                    self.debug_log(&format!("[shadow.MSTORE8] 将 value_n={} 写入内存[0x{:x}]", value_n, offset));
+                    self.debug_log(&format!("[shadow.MSTORE8] 将 nid 写入内存[0x{:x}]", offset));
                 }
                 
-                // 只写 value_n（1 字节）
-                self.memory_write(offset, 1, value_n);
+                // 同 MSTORE：创建节点使 backward_slice 可追溯
+                let nid = self.alloc_node(gs, pc32, opcode, vec![offset_n, value_n]);
+                self.memory_write(offset, 1, nid);
                 
                 if self.enable_debug_log {
-                    self.debug_log(&format!("[shadow.MSTORE8] 完成: memory[0x{:x}] := nid({})", offset, value_n));
+                    self.debug_log(&format!("[shadow.MSTORE8] 完成: memory[0x{:x}] := nid({})", offset, nid));
                 }
-                NO_NODE
+                nid
             }
 
-            // ── SLOAD(0x54) → pop 1 (key), push 1 ────────────────────
+            // SLOAD: pop 1, push 1
             0x54 => {
                 let key_n = self.pop_shadow();
                 let key = stack.last().copied().unwrap_or_default();
@@ -703,7 +694,7 @@ impl ShadowState {
                 nid
             }
 
-            // ── SSTORE(0x55) → pop 2, push 0 ─────────────────────────
+            // SSTORE: pop 2
             0x55 => {
                 let key_n = self.pop_shadow();
                 let value_n = self.pop_shadow();
@@ -728,23 +719,22 @@ impl ShadowState {
                 nid
             }
 
-            // ── JUMP(0x56) → pop 1, push 0 ───────────────────────────
+            // JUMP: pop 1
             0x56 => {
                 self.pop_shadow();
                 NO_NODE
             }
 
-            // ── JUMPI(0x57) → pop 2, push 0 ──────────────────────────
+            // JUMPI: pop 2, collect path constraint
             0x57 => {
                 self.pop_shadow();
                 self.pop_shadow();
                 NO_NODE
             }
 
-            // ── JUMPDEST(0x5b) → nop ──────────────────────────────────
             0x5b => NO_NODE,
 
-            // ── TLOAD(0x5c) → pop 1, push 1 ──────────────────────────
+            // TLOAD: pop 1, push 1
             0x5c => {
                 let key_n = self.pop_shadow();
                 let key = stack.last().copied().unwrap_or_default();
@@ -757,7 +747,7 @@ impl ShadowState {
                 nid
             }
 
-            // ── TSTORE(0x5d) → pop 2, push 0 ─────────────────────────
+            // TSTORE: pop 2
             0x5d => {
                 let key_n = self.pop_shadow();
                 let value_n = self.pop_shadow();
@@ -767,7 +757,7 @@ impl ShadowState {
                 nid
             }
 
-            // ── MCOPY(0x5e) → pop 3, push 0 ──────────────────────────
+            // MCOPY: pop 3
             0x5e => {
                 let dst_n = self.pop_shadow();
                 let src_n = self.pop_shadow();
@@ -809,7 +799,7 @@ impl ShadowState {
                 nid
             }
 
-            // ── DUP1..DUP16 (0x80..0x8f) → 复制栈值 ──────────────────
+            // DUP1-DUP16
             0x80..=0x8f => {
                 let depth = (opcode - 0x80 + 1) as usize;
                 let ss = &self.current_frame().shadow_stack;
@@ -822,7 +812,7 @@ impl ShadowState {
                 NO_NODE // DUP 不创建新节点
             }
 
-            // ── SWAP1..SWAP16 (0x90..0x9f) → 交换栈值 ─────────────────
+            // SWAP1-SWAP16
             0x90..=0x9f => {
                 let depth = (opcode - 0x90 + 1) as usize;
                 let ss = &mut self.current_frame_mut().shadow_stack;
@@ -833,7 +823,7 @@ impl ShadowState {
                 NO_NODE // SWAP 不创建新节点
             }
 
-            // ── LOG0..LOG4 (0xa0..0xa4) → pop 2+n, push 0 ────────────
+            // LOG0-LOG4
             0xa0..=0xa4 => {
                 let n_topics = (opcode - 0xa0) as usize;
                 // pop offset, size, then topics
@@ -843,7 +833,7 @@ impl ShadowState {
                 NO_NODE
             }
 
-            // ── RETURN(0xf3) / REVERT(0xfd) → pop 2, 准备返回数据影子 ─
+            // RETURN/REVERT: pop 2, prepare return shadow
             0xf3 | 0xfd => {
                 let offset_n = self.pop_shadow();
                 let size_n = self.pop_shadow();
@@ -856,7 +846,7 @@ impl ShadowState {
                 nid
             }
 
-            // ── CALL(0xf1) / CALLCODE(0xf2) → pop 7 ──────────────────
+            // CALL/CALLCODE: pop 7
             0xf1 | 0xf2 => {
                 // 先读取参数，再 pop，保持与 EVM 栈索引一致
                 let args_offset = Self::stack_val(stack, 3);
@@ -874,7 +864,7 @@ impl ShadowState {
                 nid
             }
 
-            // ── DELEGATECALL(0xf4) / STATICCALL(0xfa) → pop 6 ────────
+            // DELEGATECALL/STATICCALL: pop 6
             0xf4 | 0xfa => {
                 // 参数位置在 pop 之前计算
                 let args_offset = Self::stack_val(stack, 2);
@@ -891,7 +881,7 @@ impl ShadowState {
                 nid
             }
 
-            // ── CREATE(0xf0) → pop 3 ─────────────────────────────────
+            // CREATE: pop 3
             0xf0 => {
                 // 参数位置在 pop 之前计算
                 let offset = Self::stack_val(stack, 1);
@@ -908,7 +898,7 @@ impl ShadowState {
                 nid
             }
 
-            // ── CREATE2(0xf5) → pop 4 ────────────────────────────────
+            // CREATE2: pop 4
             0xf5 => {
                 // 参数位置在 pop 之前计算
                 let offset = Self::stack_val(stack, 1);
@@ -924,7 +914,6 @@ impl ShadowState {
                 nid
             }
 
-            // ── STOP(0x00) / INVALID(0xfe) / SELFDESTRUCT(0xff) ──────
             0x00 => NO_NODE,
             0xfe => NO_NODE,
             0xff => {
@@ -955,14 +944,13 @@ impl ShadowState {
             // 记录 frame 深度，供查询阶段做 frame 约束
             self.step_frame_depths.insert(gs, self.frames.len());
             self.step_frame_ids.insert(gs, frame_id);
-            
+            self.step_transaction_ids.insert(gs, transaction_id);
+
             // 保存 EVM 栈（原始 U256，延迟到查询时再格式化）
             let evm_stack: Vec<U256> = stack.to_vec();
             self.step_evm_stacks.insert(gs, evm_stack);
         }
     }
-
-    // ── 帧管理 ────────────────────────────────────────────────────────────
 
     /// 在 Inspector::call() / Inspector::create() 中调用
     ///
@@ -1052,8 +1040,6 @@ impl ShadowState {
         let evm_stack: Vec<U256> = stack.to_vec();
         self.step_evm_stacks_post.insert(global_step, evm_stack);
     }
-
-    // ── 查询接口 ──────────────────────────────────────────────────────────
 
     /// 从指定 global_step 开始，BFS 回溯所有祖先节点，返回排序后的 step 列表
     pub fn backward_slice(&self, global_step: u32) -> Vec<u32> {
@@ -1204,7 +1190,25 @@ impl ShadowState {
         steps
     }
 
-    /// 以树形结构返回数据流信息，用于前端显示
+    /// 多笔调试：`frame_id` 在每笔内重复，需用 `transaction_filter` 限定所属交易。
+    #[inline]
+    fn step_matches_frame_tx(
+        &self,
+        step: u32,
+        frame_id: u16,
+        transaction_filter: Option<u32>,
+    ) -> bool {
+        if self.step_frame_ids.get(&step) != Some(&frame_id) {
+            return false;
+        }
+        match transaction_filter {
+            None => true,
+            Some(tid) => self.step_transaction_ids.get(&step).copied().unwrap_or(0) == tid,
+        }
+    }
+
+    /// 以树形结构返回数据流信息，用于前端显示。
+    /// `transaction_filter`：`Some(tid)` 时与 `frame_id` 联用，解析自 `frame-{tid}-{cid}`。
     pub fn backward_slice_tree(
         &self,
         global_step: u32,
@@ -1212,6 +1216,7 @@ impl ShadowState {
         value_hint: Option<&str>,
         phase: Option<&str>,
         frame_id: Option<u16>,
+        transaction_filter: Option<u32>,
     ) -> Result<DataFlowTree, String> {
         // 统一语义：global_step 直接对应 step_node_map/global_step 快照。
         let query_step = global_step;
@@ -1230,14 +1235,19 @@ impl ShadowState {
         let target_step = if let Some(fid) = frame_id {
             (0..=query_step)
                 .rev()
-                .find(|s| self.step_frame_ids.get(s) == Some(&fid))
-                .ok_or_else(|| format!("No step found for frame_id={} at/before step {}", fid, query_step))?
+                .find(|s| self.step_matches_frame_tx(*s, fid, transaction_filter))
+                .ok_or_else(|| {
+                    format!(
+                        "No step found for frame_id={} (tx_filter={:?}) at/before step {}",
+                        fid, transaction_filter, query_step
+                    )
+                })?
         } else {
             query_step
         };
         let frame_start_step = frame_id.and_then(|fid| {
             (0..=target_step)
-                .find(|s| self.step_frame_ids.get(s) == Some(&fid))
+                .find(|s| self.step_matches_frame_tx(*s, fid, transaction_filter))
         });
         
         // 打印查询步对应的 opcode 信息
@@ -1260,8 +1270,8 @@ impl ShadowState {
         };
         
         eprintln!(
-            "[shadow.backward_slice_tree] query: step={}, step_map[{}], {}, phase={}, frame_id={:?}, target_step={}",
-            global_step, query_step, opcode_info, if use_pre { "pre" } else { "post" }, frame_id, target_step
+            "[shadow.backward_slice_tree] query: step={}, step_map[{}], {}, phase={}, frame_id={:?}, tx_filter={:?}, target_step={}",
+            global_step, query_step, opcode_info, if use_pre { "pre" } else { "post" }, frame_id, transaction_filter, target_step
         );
         
         eprintln!("[shadow.backward_slice_tree] ========== 开始构建数据流树 ==========");
@@ -1367,7 +1377,7 @@ impl ShadowState {
                 let mut found_nid = None;
                 for step in (0..=target_step).rev() {
                     if let Some(fid) = frame_id {
-                        if self.step_frame_ids.get(&step) != Some(&fid) {
+                        if !self.step_matches_frame_tx(step, fid, transaction_filter) {
                             continue;
                         }
                     }
@@ -1398,7 +1408,8 @@ impl ShadowState {
                 .nodes
                 .get(start_nid as usize)
                 .ok_or_else(|| format!("Root node {} not found", start_nid))?;
-            let root_in_frame = self.step_frame_ids.get(&root.global_step) == Some(&fid);
+            let root_in_frame =
+                self.step_matches_frame_tx(root.global_step, fid, transaction_filter);
             let root_is_calldata = root.opcode == 0xff;
             if !root_in_frame && !root_is_calldata {
                 return Err(format!(
@@ -1429,7 +1440,8 @@ impl ShadowState {
                     };
 
                     if let Some(fid) = frame_id {
-                        let in_frame = self.step_frame_ids.get(&parent_node.global_step) == Some(&fid);
+                        let in_frame =
+                            self.step_matches_frame_tx(parent_node.global_step, fid, transaction_filter);
                         let is_calldata = parent_node.opcode == 0xff;
                         let after_frame_start = frame_start_step
                             .is_none_or(|start| parent_node.global_step >= start);
@@ -1662,14 +1674,7 @@ impl ShadowState {
         self.step_stack_snapshots.len()
     }
 
-    /// 打印指定范围步骤的调试信息（用于诊断步骤是否被跳过）
-    /// 
-    /// 会输出到 console（eprintln!），包含：
-    /// - step_idx：步骤编号
-    /// - opcode：操作码及其名称
-    /// - pc：程序计数器
-    /// - node_id：节点编号
-    /// - 影子栈信息：深度和内容快照
+    /// 打印指定范围步骤的调试信息（输出到 eprintln!）
     pub fn debug_steps(&self, start_step: usize, end_step: usize) {
         eprintln!("\n[shadow.debug_steps] ========== 诊断步骤范围: {} - {} ==========", start_step, end_step);
         eprintln!("[shadow.debug_steps] step_node_map.len() = {}", self.step_node_map.len());
@@ -1743,7 +1748,7 @@ impl ShadowState {
         eprintln!("\n[shadow.debug_steps] ========== 诊断完成 ==========\n");
     }
 
-    /// 导出所有步骤的影子信息到tmp文件
+    /// 导出所有步骤的影子信息到临时文件
     pub fn export_all_steps_to_file(&self) -> Result<String, std::io::Error> {
         use std::fs::File;
         use std::io::{BufWriter, Write};
@@ -1859,7 +1864,7 @@ impl ShadowState {
         Ok(file_path.to_string_lossy().into_owned())
     }
 
-    /// 取出 ShadowState（用于存储到 DebugSession）
+    /// 取出 ShadowState（用于写回 DebugSession）
     pub fn take(self) -> Self {
         self
     }
@@ -1898,6 +1903,7 @@ impl ShadowState {
                 _ => (0xff, "NO_NODE".to_string()),
             };
             let frame_id = self.step_frame_ids.get(&step).copied();
+            let transaction_id = self.step_transaction_ids.get(&step).copied();
 
             if Self::is_deferred_post_snapshot_opcode(opcode) {
                 // CALL*/CREATE* 的 step_end 栈与最终父帧 post 栈不在同一时刻采样。
@@ -1911,6 +1917,7 @@ impl ShadowState {
                         if mismatches.len() < limit {
                             mismatches.push(ShadowValidationMismatch {
                                 step,
+                                transaction_id,
                                 frame_id,
                                 opcode,
                                 opcode_name: opcode_name.clone(),
@@ -1935,6 +1942,7 @@ impl ShadowState {
                 if mismatches.len() < limit {
                     mismatches.push(ShadowValidationMismatch {
                         step,
+                        transaction_id,
                         frame_id,
                         opcode,
                         opcode_name: opcode_name.clone(),
@@ -1958,6 +1966,7 @@ impl ShadowState {
                     if mismatches.len() < limit {
                         mismatches.push(ShadowValidationMismatch {
                             step,
+                            transaction_id,
                             frame_id,
                             opcode,
                             opcode_name: opcode_name.clone(),
@@ -1977,6 +1986,7 @@ impl ShadowState {
                         if mismatches.len() < limit {
                             mismatches.push(ShadowValidationMismatch {
                                 step,
+                                transaction_id,
                                 frame_id,
                                 opcode,
                                 opcode_name: opcode_name.clone(),
@@ -2002,5 +2012,10 @@ impl ShadowState {
             mismatch_count,
             mismatches,
         }
+    }
+
+    /// global_step → 调用帧深度（0 = 根交易体内）
+    pub fn step_frame_depths(&self) -> &HashMap<u32, usize> {
+        &self.step_frame_depths
     }
 }

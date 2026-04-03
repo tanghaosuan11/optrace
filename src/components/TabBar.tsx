@@ -6,6 +6,7 @@ interface CallFrameInfo {
   id: string;
   contextId: number;
   depth: number;
+  transactionId?: number;
 }
 
 interface TabBarProps {
@@ -20,6 +21,8 @@ export function TabBar({
   onTabChange,
 }: TabBarProps) {
   const hiddenFrameIds = useDebugStore((s) => s.hiddenFrameIds);
+  const txBoundaries = useDebugStore((s) => s.txBoundaries);
+  const showTxOnTabs = Boolean(txBoundaries && txBoundaries.length > 0);
   const visibleFrames = useMemo(
     () => callFrames.filter((f) => !hiddenFrameIds.has(f.id)),
     [callFrames, hiddenFrameIds]
@@ -80,6 +83,10 @@ export function TabBar({
         >
           {virtualizer.getVirtualItems().map((virtualItem) => {
             const frame = visibleFrames[virtualItem.index];
+            const tabLabel =
+              showTxOnTabs && frame.transactionId !== undefined
+                ? `Tx${frame.transactionId + 1} #${frame.contextId}`
+                : `Frame ${frame.contextId}`;
             return (
               <button
                 key={frame.id}
@@ -98,7 +105,7 @@ export function TabBar({
                   transform: `translateX(${virtualItem.start}px)`,
                 }}
               >
-                Frame {frame.contextId}
+                {tabLabel}
               </button>
             );
           })}

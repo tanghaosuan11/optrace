@@ -1,10 +1,5 @@
-/**
- * 合约 Storage 槽位类型系统。
- * 使用独立的 contracts.json Tauri Store（与 settings.json 隔离）。
- */
+/** Storage slot typing; persisted in `contracts.json` (separate from settings). */
 import { load, type Store } from "@tauri-apps/plugin-store";
-
-// ── SolType 判别联合 ────────────────────────────────────────────
 
 /** 基础值类型：address / bool / uintN / intN / bytesN / bytes / string */
 export interface SolPrimitive {
@@ -52,8 +47,6 @@ export interface SolPacked {
 
 export type SolType = SolPrimitive | SolArray | SolMapping | SolStruct | SolPacked;
 
-// ── 槽位定义 ─────────────────────────────────────────────────────
-
 export interface SlotInfo {
   /** 32 字节 hex 字符串，e.g. "0x0000...0001"，对应 SSTORE/SLOAD 的 key */
   slotHex: string;
@@ -68,8 +61,6 @@ export interface ContractSlots {
   slots: SlotInfo[];
   updatedAt: number; // Date.now()
 }
-
-// ── 独立 Store 实例（contracts.json）─────────────────────────────
 
 let _store: Store | null = null;
 let _loading: Promise<Store> | null = null;
@@ -88,8 +79,6 @@ async function getContractsStore(): Promise<Store> {
 function storeKey(chainId: number, address: string): string {
   return `slots:${chainId}:${address.toLowerCase()}`;
 }
-
-// ── CRUD ─────────────────────────────────────────────────────────
 
 export async function getContractSlots(
   chainId: number,
@@ -116,8 +105,6 @@ export async function deleteContractSlots(
   const s = await getContractsStore();
   await s.delete(storeKey(chainId, address));
 }
-
-// ── 工具函数 ─────────────────────────────────────────────────────
 
 /** slot 数字（或 bigint）→ 32 字节 hex 字符串 */
 export function slotNumberToHex(slot: number | bigint): string {

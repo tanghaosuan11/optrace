@@ -4,6 +4,7 @@
  * 文件保存在 app data 目录下的 settings.json。
  */
 import { load, type Store } from "@tauri-apps/plugin-store";
+import { getWindowMode } from "./windowMode";
 
 let _store: Store | null = null;
 let _loading: Promise<Store> | null = null;
@@ -29,12 +30,14 @@ export async function storeGet<T>(key: string): Promise<T | undefined> {
 
 /** 写入值 */
 export async function storeSet<T>(key: string, value: T): Promise<void> {
+  if (getWindowMode().readonly) return;
   const s = await getStore();
   await s.set(key, value);
 }
 
 /** 删除 key */
 export async function storeDel(key: string): Promise<void> {
+  if (getWindowMode().readonly) return;
   const s = await getStore();
   await s.delete(key);
 }
@@ -44,6 +47,7 @@ export async function storeDel(key: string): Promise<void> {
  * 仅在首次运行时执行（检查 migrated 标记）。
  */
 export async function migrateFromLocalStorage(): Promise<void> {
+  if (getWindowMode().readonly) return;
   const s = await getStore();
   const migrated = await s.get<boolean>("_migrated_from_ls");
   if (migrated) return;

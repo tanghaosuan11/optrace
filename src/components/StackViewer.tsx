@@ -26,6 +26,7 @@ export function StackViewer({ stackLabels = [], stackMemoryAccess = [], onMemory
   const stack = useDebugStore((s) => s.stack);
   const currentStepIndex = useDebugStore((s) => s.currentStepIndex);
   const activeTab = useDebugStore((s) => s.activeTab);
+  const sessionId = useDebugStore((s) => s.sessionId);
   const openDataFlowModal = useDebugStore((s) => s.openDataFlowModal);
   const parentRef = useRef<HTMLDivElement>(null);
 
@@ -142,6 +143,7 @@ export function StackViewer({ stackLabels = [], stackMemoryAccess = [], onMemory
                             const result = await invoke<number | null>("find_value_origin", {
                               globalIndex: currentStepIndex,
                               valueHex: val,
+                              sessionId,
                             });
                             if (result !== null && result !== undefined) {
                               onSeekTo?.(result);
@@ -179,6 +181,7 @@ export function StackViewer({ stackLabels = [], stackMemoryAccess = [], onMemory
                               valueHint: reversedStack[virtualRow.index],
                               phase: "pre",
                               frameId: activeTab,
+                              sessionId,
                             });
                             console.log("[StackViewer] backward_slice_tree returned:", tree);
                             openDataFlowModal(tree.root_id, tree.nodes);

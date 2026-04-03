@@ -27,6 +27,10 @@ const EXIT_CODE_NAMES: Record<number, string> = Object.fromEntries(
 import { useDebugStore } from "@/store/debugStore";
 
 interface CallFrame {
+  /** 与 store 中一致，如 frame-0-3 */
+  id: string;
+  /** 多笔调试：0-based；单笔常省略或 0 */
+  transactionId?: number;
   contextId: number;
   depth: number;
   callType?: "call" | "staticcall" | "delegatecall" | "create" | "create2";
@@ -81,7 +85,25 @@ export function DebugPanel({
   const [onlineFn, setOnlineFn] = useState<string | null>(null);
 
   // 从 activeFrameId 找到当前 frame 取 frame info
-  const currentFrameMeta = callFrames.find(f => `frame-${f.contextId}` === activeFrameId);
+  const txBoundaries = useDebugStore((s) => s.txBoundaries);
+  const showTxInFrameLabel = Boolean(txBoundaries && txBoundaries.length > 0);
+
+  const currentFrameMeta = callFrames.find(f => f.id === activeFrameId);
+
+  const frameLabel = (f: CallFrame) => {
+    const tx =
+      showTxInFrameLabel && f.transactionId !== undefined
+        ? `Tx${f.transactionId + 1} `
+        : "";
+    return f.contextId === 1 ? `${tx}Frame#1` : `${tx}Frame#${f.contextId}`;
+  };
+
+  const parentFrame = (parentContextId: number, sameTxAs: CallFrame) =>
+    callFrames.find(
+      f =>
+        f.contextId === parentContextId &&
+        (f.transactionId ?? 0) === (sameTxAs.transactionId ?? 0),
+    );
 
   // 步进时清除手动点击的内存高亮
   useEffect(() => {
@@ -320,21 +342,22 @@ export function DebugPanel({
                     let cur: CallFrame | undefined = currentFrameMeta;
                     while (cur) {
                       chain.unshift(cur);
-                      cur = cur.parentId != null
-                        ? callFrames.find(f => f.contextId === cur!.parentId)
-                        : undefined;
+                      cur =
+                        cur.parentId != null
+                          ? parentFrame(cur.parentId, cur)
+                          : undefined;
                     }
                     return (
                       <div className="flex items-center flex-wrap gap-x-0.5 text-[10px] font-mono mb-1.5 leading-4">
                         {chain.map((f, i) => {
-                          const isCurrent = f.contextId === currentFrameMeta.contextId;
-                          const label = f.contextId === 1 ? 'Frame#1' : `Frame#${f.contextId}`;
+                          const isCurrent = f.id === currentFrameMeta.id;
+                          const label = frameLabel(f);
                           return (
-                            <span key={f.contextId} className="flex items-center gap-0.5">
+                            <span key={f.id} className="flex items-center gap-0.5">
                               {i > 0 && <span className="text-muted-foreground/50">›</span>}
                               {isCurrent
                                 ? <span className="">{label}</span>
-                                : <span className="text-blue-400 hover:text-blue-300 cursor-pointer transition-colors" onClick={() => onSelectFrame(`frame-${f.contextId}`)}>{label}</span>
+                                : <span className="text-blue-400 hover:text-blue-300 cursor-pointer transition-colors" onClick={() => onSelectFrame(f.id)}>{label}</span>
                               }
                             </span>
                           );

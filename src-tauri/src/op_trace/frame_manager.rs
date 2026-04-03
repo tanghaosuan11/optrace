@@ -6,6 +6,9 @@ use revm_interpreter::InterpreterResult;
 
 #[derive(Clone, Default, serde::Serialize)]
 pub struct FrameInfo {
+    /// 多笔调试时第几笔（0-based）；单 tx 为 0
+    #[serde(default)]
+    pub transaction_id: u32,
     pub parent_id: u16,
     pub depth: u16,
     pub frame_id: u16,

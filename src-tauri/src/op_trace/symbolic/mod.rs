@@ -1,0 +1,72 @@
+//! 符号执行模块 — 公共接口
+//!
+//! 完全独立于 ShadowState，不修改任何现有执行逻辑。
+//!
+//! 使用流程：
+//! 1. 构建 `SymConfig`（指定哪些 calldata 字节是符号）
+//! 2. 调用 `engine::replay_from_trace` 从已有 trace 数据重放符号引擎
+//! 3. 用 `solver::build_smt2_query` 构建 SMT-LIB2 查询
+//! 4. 调用 `solver::run_z3` 执行 Z3，得到 `SolverResult`
+
+pub mod expr;
+pub mod engine;
+pub mod solver;
+
+pub use engine::replay_from_trace;
+pub use solver::{SolverResult, SymGoal, build_smt2_query, run_z3};
+pub use solver::PathConstraint;
+
+use serde::{Deserialize, Serialize};
+
+/// 符号执行配置 — 指定哪些输入变量被视为符号
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SymConfig {
+    /// calldata 中需要被符号化的位置
+    ///
+    /// 每项 `(offset, name)` 表示：CALLDATALOAD(offset) 返回符号变量 `name`
+    ///
+    /// 示例（ERC-20 transfer）：
+    /// ```json
+    /// [
+    ///   [4,  "amount"],
+    ///   [36, "recipient"]
+    /// ]
+    /// ```
+    /// 注意：这里的 offset 是 `CALLDATALOAD` 指令的第一个字节偏移。
+    /// ABI 编码中，函数选择器 4 字节后，第一个参数 CALLDATALOAD(4)，第二个 CALLDATALOAD(36)，etc.
+    #[serde(default)]
+    pub calldata_symbols: Vec<(usize, String)>,
+
+    /// 是否将 CALLVALUE 视为符号
+    #[serde(default)]
+    pub callvalue_sym: bool,
+
+    /// 是否将 CALLER（msg.sender）视为符号
+    #[serde(default)]
+    pub caller_sym: bool,
+
+    /// 是否将 ORIGIN（tx.origin）视为符号
+    #[serde(default)]
+    pub origin_sym: bool,
+
+    /// 是否将 TIMESTAMP（block.timestamp）视为符号
+    #[serde(default)]
+    pub timestamp_sym: bool,
+
+    /// 是否将 NUMBER（block.number）视为符号
+    #[serde(default)]
+    pub block_number_sym: bool,
+}
+
+impl Default for SymConfig {
+    fn default() -> Self {
+        Self {
+            calldata_symbols: Vec::new(),
+            callvalue_sym: false,
+            caller_sym: false,
+            origin_sym: false,
+            timestamp_sym: false,
+            block_number_sym: false,
+        }
+    }
+}

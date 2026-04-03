@@ -12,7 +12,7 @@ use revm::{
         SelfDestructResult, StateLoad,
     },
     primitives::{
-         hardfork::SpecId, Address, AddressMap, AddressSet,
+        hardfork::SpecId, Address, AddressMap, AddressSet,
         HashSet, Log, StorageKey, StorageValue, B256, U256,
     },
     state::{Account,  Bytecode, EvmState},
@@ -21,23 +21,54 @@ use revm::{
 
 use anyhow::Result;
 use std::{ fmt::Debug};
+use std::collections::HashMap as HM;
 
 
 #[derive(Debug)]
 pub struct OpTraceJournal<Db: Database> {
-    /// In fork mode, Foundry stores (`JournaledState`, `Database`) pairs for each fork.
     journaled_state: Journal<Db>,
+    current_transaction_id: u32,
+    /// ETH 余额变化（按交易分组）：address -> (gained, lost)
+    eth_deltas_by_tx: HM<u32, HM<Address, (U256, U256)>>,
 }
 
 impl<Db: Database> OpTraceJournal<Db> {
     pub fn new(spec_id: SpecId, db: Db) -> Self {
         let mut journaled_state = Journal::new(db);
         journaled_state.set_spec_id(spec_id);
-        Self { journaled_state }
+        Self {
+            journaled_state,
+            current_transaction_id: 0,
+            eth_deltas_by_tx: HM::new(),
+        }
     }
 
     pub fn with_journaled_state(&self) -> &Journal<Db> {
         &self.journaled_state
+    }
+
+    pub fn set_transaction_id(&mut self, tid: u32) {
+        self.current_transaction_id = tid;
+    }
+
+    pub fn take_eth_deltas_by_tx(&mut self) -> HM<u32, HM<Address, (U256, U256)>> {
+        std::mem::take(&mut self.eth_deltas_by_tx)
+    }
+
+    fn record_eth_gain(&mut self, address: Address, amount: U256) {
+        if amount.is_zero() { return; }
+        let tid = self.current_transaction_id;
+        let entry = self.eth_deltas_by_tx.entry(tid).or_default();
+        let e = entry.entry(address).or_insert((U256::ZERO, U256::ZERO));
+        e.0 += amount;
+    }
+
+    fn record_eth_loss(&mut self, address: Address, amount: U256) {
+        if amount.is_zero() { return; }
+        let tid = self.current_transaction_id;
+        let entry = self.eth_deltas_by_tx.entry(tid).or_default();
+        let e = entry.entry(address).or_insert((U256::ZERO, U256::ZERO));
+        e.1 += amount;
     }
 }
 
@@ -132,7 +163,13 @@ impl<Db: Database + 'static> JournalTr for OpTraceJournal<Db> {
         to: Address,
         balance: U256,
     ) -> Result<Option<TransferError>, <Self::Database as Database>::Error> {
-        self.journaled_state.transfer(from, to, balance)
+        let r = self.journaled_state.transfer(from, to, balance)?;
+        // 仅当转账成功（无错误）时记录 ETH 变化
+        if r.is_none() {
+            self.record_eth_loss(from, balance);
+            self.record_eth_gain(to, balance);
+        }
+        Ok(r)
     }
 
     fn transfer_loaded(
@@ -141,7 +178,12 @@ impl<Db: Database + 'static> JournalTr for OpTraceJournal<Db> {
         to: Address,
         balance: U256,
     ) -> Option<TransferError> {
-        self.journaled_state.transfer_loaded(from, to, balance)
+        let r = self.journaled_state.transfer_loaded(from, to, balance);
+        if r.is_none() {
+            self.record_eth_loss(from, balance);
+            self.record_eth_gain(to, balance);
+        }
+        r
     }
 
     fn load_account(
@@ -217,6 +259,7 @@ impl<Db: Database + 'static> JournalTr for OpTraceJournal<Db> {
     }
 
     fn finalize(&mut self) -> Self::State {
+        println!("[OpTraceJournal] finalize called at depth {}", self.depth());
         self.journaled_state.finalize()
     }
 
@@ -234,7 +277,10 @@ impl<Db: Database + 'static> JournalTr for OpTraceJournal<Db> {
         address: Address,
         balance: U256,
     ) -> Result<(), <Self::Database as Database>::Error> {
-        self.journaled_state.balance_incr(address, balance)
+        self.journaled_state.balance_incr(address, balance)?;
+        // coinbase / refund 等增量也计入 ETH gain
+        self.record_eth_gain(address, balance);
+        Ok(())
     }
 
     fn nonce_bump_journal_entry(&mut self, _address: Address) {
@@ -246,6 +292,7 @@ impl<Db: Database + 'static> JournalTr for OpTraceJournal<Db> {
     }
 
     fn commit_tx(&mut self) {
+        println!("[OpTraceJournal] commit_tx called at depth {}", self.depth());
         self.journaled_state.commit_tx()
     }
 

@@ -1,5 +1,5 @@
 import { create, type UseBoundStore, type StoreApi } from "zustand";
-import type { TxData, BlockData } from "@/lib/txFetcher";
+import { emptyTxListRow, emptyTxSlot, type TxData, type BlockData, type TxListRow, type TxSlot } from "@/lib/txFetcher";
 import type {
   StorageChangeEntry,
   CallFrame,
@@ -15,9 +15,7 @@ import { type AppConfig, DEFAULT_CONFIG } from "@/lib/appConfig";
 // Re-export for consumers that import from debugStore
 export type { Opcode, LogEntry, StateDiff, AddressBalance };
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Slice 1: Playback — 当前帧数据 + 播放控制
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Slice 1: playback（当前帧 + 播放控制）
 
 export interface PlaybackSlice {
   // 当前帧数据（由 applyStep 写入）
@@ -52,6 +50,8 @@ export interface PlaybackSlice {
   rangeEnabled: boolean;
   rangeStart: number;
   rangeEnd: number;
+  /** 多笔调试：第 2 笔起每笔在全局 trace 中的起始下标；单笔为 null */
+  txBoundaries: number[] | null;
 }
 
 const initialPlayback: PlaybackSlice = {
@@ -80,11 +80,10 @@ const initialPlayback: PlaybackSlice = {
   rangeEnabled: false,
   rangeStart: 0,
   rangeEnd: 0,
+  txBoundaries: null,
 };
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Slice 2: Condition — 条件断点 + 断点管理
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Slice 2: breakpoints / conditions
 
 export interface ConditionSlice {
   // 断点 opcodes
@@ -100,6 +99,8 @@ export interface ConditionSlice {
   // 条件断点扫描结果
   conditionHitSet: Set<number>;
   scanHits: ScanHit[];
+  /** 多笔调试：条件扫描范围，null = 全部交易；否则为交易下标 0..n-1（与后端 transaction_id 一致） */
+  conditionScanTransactionId: number | null;
 }
 
 const initialCondition: ConditionSlice = {
@@ -110,11 +111,10 @@ const initialCondition: ConditionSlice = {
   condNodes: [],
   conditionHitSet: new Set<number>(),
   scanHits: [],
+  conditionScanTransactionId: null,
 };
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Slice 2b: Notes — 值记录 + 步数标记
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Slice 2b: notes（值记录 + 步数标记）
 
 export type ValueSource =
   | { type: "stack"; depth: number; value: string }
@@ -149,9 +149,7 @@ const initialNotes: NotesSlice = {
   stepMarks: [],
 };
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Slice 3: UI — Tab / 导航 / 面板可见性
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Slice 3: UI（tab / 导航 / 面板）
 
 export interface UISlice {
   // Tab 管理
@@ -168,6 +166,9 @@ export interface UISlice {
   isBookmarksOpen: boolean;
   isCondListOpen: boolean;
   isCallTreeOpen: boolean;
+  isSymbolicSolveOpen: boolean;
+  /** 打开符号求解抽屉时预填的目标 step 索引（null = 不预填） */
+  symbolicPrefillStep: number | null;
   isTestDialogOpen: boolean;
   testBytecode: string;
   testOpcodes: Array<{ pc: number; name: string; data?: string }>;
@@ -201,6 +202,8 @@ const initialUI: UISlice = {
   isBookmarksOpen: false,
   isCondListOpen: false,
   isCallTreeOpen: false,
+  isSymbolicSolveOpen: false,
+  symbolicPrefillStep: null,
   isTestDialogOpen: false,
   testBytecode: "",
   testOpcodes: [],
@@ -211,9 +214,7 @@ const initialUI: UISlice = {
   dataFlowTreeNodes: [],
 };
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Slice 3b: Config — 统一应用配置
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Slice 3b: app config
 
 export interface ConfigSlice {
   config: AppConfig;
@@ -223,34 +224,42 @@ const initialConfig: ConfigSlice = {
   config: { ...DEFAULT_CONFIG },
 };
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Slice 4: TX — 交易 / 调试会话
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Slice 4: tx / session
 
 export interface TxSlice {
+  sessionId: string;
   tx: string;
   txData: TxData | null;
   blockData: BlockData | null;
+  txSlots: TxSlot[];
+  txDataList: TxListRow[];
+  debugByTx: boolean;
   isFetchingTx: boolean;
   txError: string;
   isDebugging: boolean;
   currentDebugChainId: number | undefined;
+  /** Backend `Finished` handled and trace finalized — enables CFG etc. */
+  traceFinished: boolean;
 }
 
 const testTx = import.meta.env.VITE_TEST_TX ?? "";
+const initialTxSlots: TxSlot[] = [emptyTxSlot(testTx)];
 const initialTx: TxSlice = {
-  tx: testTx,
+  sessionId: "",
+  tx: testTx.startsWith("0x") ? testTx.slice(2) : testTx,
   txData: null,
   blockData: null,
+  txSlots: initialTxSlots,
+  txDataList: [emptyTxListRow()],
+  debugByTx: true,
   isFetchingTx: false,
   txError: "",
   isDebugging: false,
   currentDebugChainId: undefined,
+  traceFinished: false,
 };
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 合并 State + Actions
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Merged state + actions
 
 export type DebugState = PlaybackSlice & ConditionSlice & NotesSlice & UISlice & ConfigSlice & TxSlice;
 
@@ -310,8 +319,6 @@ const initialState: DebugState = {
 };
 
 export type DebugStore = DebugState & DebugActions;
-
-/* ── Store ───────────────────────────────────────────────────── */
 
 export const useDebugStore: UseBoundStore<StoreApi<DebugStore>> = create<DebugStore>()((set) => ({
   ...initialState,

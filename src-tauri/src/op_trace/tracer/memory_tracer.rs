@@ -83,6 +83,7 @@ impl MemoryTracer {
         &self,
         opcode: OpCode,
         interp: &revm::interpreter::Interpreter<EthInterpreter>,
+        transaction_id: u32,
         frame_id: u16,
         frame_step: usize,
         debug_session: &Arc<Mutex<DebugSession>>,
@@ -100,6 +101,7 @@ impl MemoryTracer {
                     if new_size > memory_len_before {
                         let expand_data = vec![0u8; new_size - memory_len_before];
                         debug_session.lock().unwrap().push_patch(
+                            transaction_id,
                             frame_id,
                             frame_step_u32,
                             memory_len_before as u32,
@@ -117,6 +119,7 @@ impl MemoryTracer {
                 }
                 let data = interp.memory.slice(dst_offset..dst_offset + size).to_vec();
                 debug_session.lock().unwrap().push_patch(
+                    transaction_id,
                     frame_id,
                     frame_step_u32,
                     dst_offset as u32,
@@ -132,6 +135,7 @@ impl MemoryTracer {
                 }
                 let data = interp.memory.slice(dst_offset..dst_offset + size).to_vec();
                 debug_session.lock().unwrap().push_patch(
+                    transaction_id,
                     frame_id,
                     frame_step_u32,
                     dst_offset as u32,
@@ -144,7 +148,7 @@ impl MemoryTracer {
                 let size = self.memory_size;
                 if size > 0 {
                     let data = interp.memory.slice(offset..offset + size).to_vec();
-                    encoder.send_return_data(frame_id, frame_step, &data);
+                    encoder.send_return_data(transaction_id, frame_id, frame_step, &data);
                     // 返回给调用方，让其处理写入父帧的逻辑
                     return Some(ReturnValueInfo { data });
                 }
@@ -157,6 +161,7 @@ impl MemoryTracer {
                 if new_size > memory_len_before {
                     let expand_data = vec![0u8; new_size - memory_len_before];
                     debug_session.lock().unwrap().push_patch(
+                        transaction_id,
                         frame_id,
                         frame_step_u32,
                         memory_len_before as u32,

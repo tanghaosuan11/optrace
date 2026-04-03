@@ -1,0 +1,204 @@
+{
+    "@hpcc-js/wasm@2.33.2": {
+        "licenses": "Apache-2.0",
+        "repository": "https://github.com/hpcc-systems/hpcc-js-wasm",
+        "publisher": "hpcc-systems",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@hpcc-js/wasm",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@hpcc-js/wasm/LICENSE"
+    },
+    "@monaco-editor/react@4.7.0": {
+        "licenses": "MIT",
+        "repository": "https://github.com/suren-atoyan/monaco-react",
+        "publisher": "Suren Atoyan",
+        "email": "contact@surenatoyan.com",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@monaco-editor/react",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@monaco-editor/react/LICENSE"
+    },
+    "@radix-ui/react-checkbox@1.3.3": {
+        "licenses": "MIT",
+        "repository": "https://github.com/radix-ui/primitives",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@radix-ui/react-checkbox",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@radix-ui/react-checkbox/LICENSE"
+    },
+    "@radix-ui/react-context-menu@2.2.16": {
+        "licenses": "MIT",
+        "repository": "https://github.com/radix-ui/primitives",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@radix-ui/react-context-menu",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@radix-ui/react-context-menu/LICENSE"
+    },
+    "@radix-ui/react-dialog@1.1.15": {
+        "licenses": "MIT",
+        "repository": "https://github.com/radix-ui/primitives",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@radix-ui/react-dialog",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@radix-ui/react-dialog/LICENSE"
+    },
+    "@radix-ui/react-label@2.1.8": {
+        "licenses": "MIT",
+        "repository": "https://github.com/radix-ui/primitives",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@radix-ui/react-label",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@radix-ui/react-label/LICENSE"
+    },
+    "@radix-ui/react-popover@1.1.15": {
+        "licenses": "MIT",
+        "repository": "https://github.com/radix-ui/primitives",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@radix-ui/react-popover",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@radix-ui/react-popover/LICENSE"
+    },
+    "@radix-ui/react-select@2.2.6": {
+        "licenses": "MIT",
+        "repository": "https://github.com/radix-ui/primitives",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@radix-ui/react-select",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@radix-ui/react-select/LICENSE"
+    },
+    "@radix-ui/react-slider@1.3.6": {
+        "licenses": "MIT",
+        "repository": "https://github.com/radix-ui/primitives",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@radix-ui/react-slider",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@radix-ui/react-slider/LICENSE"
+    },
+    "@radix-ui/react-slot@1.2.4": {
+        "licenses": "MIT",
+        "repository": "https://github.com/radix-ui/primitives",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@radix-ui/react-slot",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@radix-ui/react-slot/LICENSE"
+    },
+    "@radix-ui/react-tabs@1.1.13": {
+        "licenses": "MIT",
+        "repository": "https://github.com/radix-ui/primitives",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@radix-ui/react-tabs",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@radix-ui/react-tabs/LICENSE"
+    },
+    "@radix-ui/react-toast@1.2.15": {
+        "licenses": "MIT",
+        "repository": "https://github.com/radix-ui/primitives",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@radix-ui/react-toast",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@radix-ui/react-toast/LICENSE"
+    },
+    "@radix-ui/react-tooltip@1.2.8": {
+        "licenses": "MIT",
+        "repository": "https://github.com/radix-ui/primitives",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@radix-ui/react-tooltip",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@radix-ui/react-tooltip/LICENSE"
+    },
+    "@tanstack/react-virtual@3.13.18": {
+        "licenses": "MIT",
+        "repository": "https://github.com/TanStack/virtual",
+        "publisher": "Tanner Linsley",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@tanstack/react-virtual",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@tanstack/react-virtual/LICENSE"
+    },
+    "@tauri-apps/api@2.10.1": {
+        "licenses": "Apache-2.0 OR MIT",
+        "repository": "https://github.com/tauri-apps/tauri",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@tauri-apps/api",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@tauri-apps/api/README.md"
+    },
+    "@tauri-apps/plugin-opener@2.5.3": {
+        "licenses": "MIT OR Apache-2.0",
+        "repository": "https://github.com/tauri-apps/plugins-workspace",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@tauri-apps/plugin-opener",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@tauri-apps/plugin-opener/LICENSE.spdx"
+    },
+    "@tauri-apps/plugin-store@2.4.2": {
+        "licenses": "MIT OR Apache-2.0",
+        "repository": "https://github.com/tauri-apps/plugins-workspace",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@tauri-apps/plugin-store",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/@tauri-apps/plugin-store/LICENSE.spdx"
+    },
+    "class-variance-authority@0.7.1": {
+        "licenses": "Apache-2.0",
+        "repository": "https://github.com/joe-bell/cva",
+        "publisher": "Joe Bell",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/class-variance-authority",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/class-variance-authority/LICENSE"
+    },
+    "clsx@2.1.1": {
+        "licenses": "MIT",
+        "repository": "https://github.com/lukeed/clsx",
+        "publisher": "Luke Edwards",
+        "email": "luke.edwards05@gmail.com",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/clsx",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/clsx/license"
+    },
+    "lucide-react@0.562.0": {
+        "licenses": "ISC",
+        "repository": "https://github.com/lucide-icons/lucide",
+        "publisher": "Eric Fennis",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/lucide-react",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/lucide-react/LICENSE"
+    },
+    "monaco-editor@0.55.1": {
+        "licenses": "MIT",
+        "repository": "https://github.com/microsoft/monaco-editor",
+        "publisher": "Microsoft Corporation",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/monaco-editor",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/monaco-editor/LICENSE"
+    },
+    "next-themes@0.4.6": {
+        "licenses": "MIT",
+        "repository": "https://github.com/pacocoursey/next-themes",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/next-themes",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/next-themes/license.md"
+    },
+    "optrace@0.1.7": {
+        "licenses": "UNLICENSED",
+        "private": true,
+        "path": "/Users/suanjie/Documents/Projects/OpTrace",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/LICENSE"
+    },
+    "pixi.js@8.17.1": {
+        "licenses": "MIT",
+        "repository": "https://github.com/pixijs/pixijs",
+        "publisher": "PixiJS Team",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/pixi.js",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/pixi.js/LICENSE"
+    },
+    "react-dom@19.2.3": {
+        "licenses": "MIT",
+        "repository": "https://github.com/facebook/react",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/react-dom",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/react-dom/LICENSE"
+    },
+    "react-resizable-panels@4.7.3": {
+        "licenses": "MIT",
+        "repository": "https://github.com/bvaughn/react-resizable-panels",
+        "publisher": "Brian Vaughn",
+        "email": "brian.david.vaughn@gmail.com",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/react-resizable-panels",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/react-resizable-panels/LICENSE.md"
+    },
+    "react@19.2.3": {
+        "licenses": "MIT",
+        "repository": "https://github.com/facebook/react",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/react",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/react/LICENSE"
+    },
+    "sonner@2.0.7": {
+        "licenses": "MIT",
+        "repository": "https://github.com/emilkowalski/sonner",
+        "publisher": "Emil Kowalski",
+        "email": "e@emilkowal.ski",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/sonner",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/sonner/LICENSE.md"
+    },
+    "tailwind-merge@3.4.0": {
+        "licenses": "MIT",
+        "repository": "https://github.com/dcastil/tailwind-merge",
+        "publisher": "Dany Castillo",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/tailwind-merge",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/tailwind-merge/LICENSE.md"
+    },
+    "viem@2.44.4": {
+        "licenses": "MIT",
+        "repository": "https://github.com/wevm/viem",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/viem",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/viem/LICENSE"
+    },
+    "zustand@5.0.11": {
+        "licenses": "MIT",
+        "repository": "https://github.com/pmndrs/zustand",
+        "publisher": "Paul Henschel",
+        "path": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/zustand",
+        "licenseFile": "/Users/suanjie/Documents/Projects/OpTrace/node_modules/zustand/LICENSE"
+    }
+}

@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Editor, { type OnMount } from "@monaco-editor/react";
 import * as monacoNS from "monaco-editor";
 import { invoke } from "@tauri-apps/api/core";
-import { Loader2, FileCode } from "lucide-react";
+import { Loader2, FileCode, Undo2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { useDebugStore } from "@/store/debugStore";
@@ -60,6 +60,39 @@ function basenameLabel(path: string): string {
   return path.split("/").pop() || path;
 }
 
+/** Heimdall `compilation.abi` 条目 → 函数列表（用于跳转） */
+interface DecompilerFuncRow {
+  name: string;
+  line: number;
+  selector?: string;
+}
+
+function extractAbiFunctions(compilation: unknown): DecompilerFuncRow[] {
+  if (!compilation || typeof compilation !== "object") return [];
+  const abi = (compilation as Record<string, unknown>).abi;
+  if (!Array.isArray(abi)) return [];
+  const out: DecompilerFuncRow[] = [];
+  for (const item of abi) {
+    if (!item || typeof item !== "object") continue;
+    const o = item as Record<string, unknown>;
+    if (o.type !== "function") continue;
+    const name = typeof o.name === "string" ? o.name : "fallback";
+    let selector: string | undefined;
+    if (typeof o.signature === "string") selector = o.signature;
+    else if (typeof o.function_signature === "string") selector = o.function_signature;
+    out.push({ name, line: 1, selector });
+  }
+  return out;
+}
+
+function findFunctionLineByName(content: string, name: string): number | null {
+  const safe = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`\\bfunction\\s+${safe}\\s*\\(`, "m");
+  const m = re.exec(content);
+  if (!m) return null;
+  return content.slice(0, m.index).split("\n").length;
+}
+
 function inferLanguage(filename: string): string {
   const ext = filename.split(".").pop()?.toLowerCase() ?? "";
   if (ext === "sol") return "solidity";
@@ -72,7 +105,6 @@ function inferLanguage(filename: string): string {
 
 const SOURCIFY_BASE = "https://sourcify.dev/server/v2/contract";
 
-// ── Virtual model URI helpers ────────────────────────────────────────────────
 const MODEL_SCHEME = "inmemory";
 const MODEL_AUTH = "sourcify";
 
@@ -90,8 +122,7 @@ function uriToPath(uri: monacoNS.Uri): string | null {
   return uri.path.replace(/^\//, "");
 }
 
-// ── Go-to-Definition: regex over all virtual models ──────────────────────────
-// Matches: contract Foo / interface Foo / function foo / event Foo / struct Foo / ...
+// Go-to-definition: scan all virtual models for Solidity decls.
 const DECL_RE =
   /\b(?:contract|interface|library|struct|enum|event|error|modifier|function|type)\s+(\w+)/g;
 
@@ -130,7 +161,7 @@ export function SourceViewer() {
 
   const frame = useMemo(() => {
     if (!activeStoreTab.startsWith("frame-")) return undefined;
-    return callFrames.find((f) => `frame-${f.contextId}` === activeStoreTab);
+    return callFrames.find((f) => f.id === activeStoreTab);
   }, [activeStoreTab, callFrames]);
 
   const codeAddress = frame?.contract ?? frame?.address;
@@ -206,6 +237,49 @@ export function SourceViewer() {
     if (!parsed || !sources) return [];
     return extractSourceList(parsed, sources as Record<string, unknown>);
   }, [parsed, sources]);
+
+  const isHeimdallDecompiled = useMemo(() => {
+    if (!parsed || typeof parsed !== "object") return false;
+    const p = parsed as Record<string, unknown>;
+    if (p.decompiler === "heimdall-rs") return true;
+    const compilation = p.compilation;
+    if (compilation && typeof compilation === "object") {
+      const c = compilation as Record<string, unknown>;
+      return c.decompiler === "heimdall-rs";
+    }
+    return false;
+  }, [parsed]);
+
+  const decompilerFunctions = useMemo((): DecompilerFuncRow[] => {
+    if (!isHeimdallDecompiled || !sources || !activeFile) return [];
+    const content = sources[activeFile]?.content ?? "";
+    if (!content.trim()) return [];
+    const comp = extractCompilation(parsed);
+    const fromAbi = extractAbiFunctions(comp ?? null);
+    if (fromAbi.length > 0) {
+      return fromAbi.map((f) => {
+        const line = findFunctionLineByName(content, f.name);
+        return { ...f, line: line ?? 1 };
+      });
+    }
+    const rows: DecompilerFuncRow[] = [];
+    const re = /\bfunction\s+(\w+)\s*\(/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(content)) !== null) {
+      rows.push({
+        name: m[1],
+        line: content.slice(0, m.index).split("\n").length,
+      });
+    }
+    return rows;
+  }, [isHeimdallDecompiled, sources, activeFile, parsed]);
+
+  const jumpToFunctionLine = useCallback((line: number) => {
+    const ed = editorRef.current;
+    if (!ed || line < 1) return;
+    ed.setPosition({ lineNumber: line, column: 1 });
+    ed.revealLineInCenter(line);
+  }, []);
 
   useEffect(() => {
     if (!sources) return;
@@ -289,7 +363,6 @@ export function SourceViewer() {
     }
   }, [activeFile, editorMounted]);
 
-  // ── PC → source highlight ─────────────────────────────────────────────────
   useEffect(() => {
     if (!editorMounted || currentPc < 0 || !runtimeLocations || !pcMap.size) {
       decorationsRef.current?.set([]);
@@ -373,7 +446,6 @@ export function SourceViewer() {
     } catch (e) {
       console.log("[SourceMap structErr]", e);
     }
-    // ── END DEBUG ──
 
     const monacoRange: monacoNS.IRange = {
       startLineNumber: startPos.lineNumber,
@@ -449,7 +521,6 @@ export function SourceViewer() {
     setEditorMounted(true);
   }, []);
 
-  // ── 读本地缓存 ────────────────────────────────────────────────────────────
   const loadCache = useCallback(async () => {
     if (chainId == null || !codeAddress) {
       setRawJson(null);
@@ -485,7 +556,6 @@ export function SourceViewer() {
     void loadCache();
   }, [loadCache]);
 
-  // ── 前端 fetch → 后端写缓存 ───────────────────────────────────────────────
   const handleFetch = async () => {
     if (chainId == null || !codeAddress) return;
     setFetching(true);
@@ -518,7 +588,6 @@ export function SourceViewer() {
     }
   };
 
-  // ── 调用后端反编译字节码 ──────────────────────────────────────────────────
   const handleDecompile = async () => {
     if (chainId == null || !codeAddress || !frame?.bytecode) return;
     setDecompiling(true);
@@ -536,10 +605,15 @@ export function SourceViewer() {
       setDecompiling(false);
     }
   };
+  const handleUndoDecompile = useCallback(() => {
+    // Return to pre-decompile empty overlay state (two buttons).
+    setRawJson(null);
+    setActiveFile(null);
+    toast.success("Decompile result cleared");
+  }, []);
 
-  const monacoTheme = document.documentElement.classList.contains("dark")
-    ? "vs-dark"
-    : "vs";
+  // Monaco theme is global across all editors; keep SourceViewer stable/light.
+  const monacoTheme = "vs";
 
   let overlay: React.ReactNode = null;
   if (!chainId) {
@@ -661,6 +735,27 @@ export function SourceViewer() {
         ))}
       </div>
 
+      {isHeimdallDecompiled && decompilerFunctions.length > 0 && (
+        <div className="flex-shrink-0 border-b border-border/60 px-2 py-1 bg-muted/20">
+          <div className="text-[10px] font-medium text-muted-foreground mb-1">
+            Decompiled functions
+          </div>
+          <div className="flex flex-wrap gap-1 max-h-[4.5rem] overflow-y-auto">
+            {decompilerFunctions.map((f, i) => (
+              <button
+                key={`${f.name}-${f.line}-${i}`}
+                type="button"
+                title={f.selector ? `${f.name} — ${f.selector}` : f.name}
+                className="text-[10px] font-mono px-1.5 py-0 rounded border border-border/70 bg-background hover:bg-accent"
+                onClick={() => jumpToFunctionLine(f.line)}
+              >
+                {f.name}()
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Monaco Editor — 始终挂载 */}
       <div className="flex-1 min-h-0 overflow-hidden">
         <Editor
@@ -695,6 +790,21 @@ export function SourceViewer() {
           <summary className="cursor-pointer select-none hover:text-foreground">
             Compilation
           </summary>
+          {isHeimdallDecompiled && (
+            <div className="mt-1">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleUndoDecompile}
+                className="h-6 px-2 gap-1 text-[11px]"
+                title="Undo Heimdall decompile"
+              >
+                <Undo2 className="h-3 w-3" />
+                Undo Decompile
+              </Button>
+            </div>
+          )}
           <pre className="mt-1 max-h-40 overflow-auto text-[9px] font-mono whitespace-pre-wrap break-all">
             {JSON.stringify(compilation, null, 2)}
           </pre>

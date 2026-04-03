@@ -6,6 +6,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { CheckCircle2, XCircle, Loader2 } from "lucide-react";
 
 interface TxInfoProps {
+  /** 附加到外层 Card */
+  className?: string;
   txHash?: string;
   from?: string;
   to?: string;
@@ -22,6 +24,7 @@ interface TxInfoProps {
 }
 
 export function TxInfo({
+  className,
   txHash,
   from,
   to,
@@ -38,7 +41,7 @@ export function TxInfo({
 }: TxInfoProps) {
   if (isLoading) {
     return (
-      <Card className="p-6">
+      <Card className={`p-6 ${className ?? ""}`}>
         <div className="flex items-center justify-center gap-2 text-muted-foreground">
           <Loader2 className="h-4 w-4 animate-spin" />
           <span>Loading transaction...</span>
@@ -49,7 +52,7 @@ export function TxInfo({
 
   if (error) {
     return (
-      <Card className="p-6">
+      <Card className={`p-6 ${className ?? ""}`}>
         <div className="flex items-start gap-2 text-destructive">
           <XCircle className="h-5 w-5 flex-shrink-0 mt-0.5" />
           <div>
@@ -63,7 +66,7 @@ export function TxInfo({
 
   if (!txHash) {
     return (
-      <Card className="p-6">
+      <Card className={`p-6 ${className ?? ""}`}>
         <div className="text-center text-muted-foreground text-sm">
           Enter a transaction hash to view details
         </div>
@@ -72,7 +75,7 @@ export function TxInfo({
   }
 
   return (
-    <Card className="p-3">
+    <Card className={`p-3 ${className ?? ""}`}>
       <div className="space-y-2">
         <div className="flex items-center gap-2 mb-1">
           <h3 className="font-semibold text-sm flex-shrink-0">Transaction</h3>

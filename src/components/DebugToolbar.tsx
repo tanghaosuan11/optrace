@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet";
+import { BottomSheetShell } from "@/components/ui/bottom-sheet-shell";
 import { Input } from "@/components/ui/input";
 import { ProgressBar } from "@/components/ProgressBar";
 import { CallTreeViewer } from "@/components/CallTreeViewer";
@@ -9,13 +9,11 @@ import { useForkStore } from "@/store/forkStore";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { toast } from "sonner";
-import {
-  PauseConditionType,
-  PauseCondition,
-  PAUSE_CONDITION_LABELS,
-} from "@/lib/pauseConditions";
 import { findCallPatterns, MatchResult } from "@/lib/patternMatcher";
 import { ShadowDiagnosticsDialog } from "@/components/ShadowDiagnosticsDialog";
+import { useDebugUiActions } from "@/hooks/useDebugUiActions";
+import { openForkWindow } from "@/lib/windowActions";
+import { getWindowMode } from "@/lib/windowMode";
 import {
   Select,
   SelectContent,
@@ -24,17 +22,19 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { 
-  ArrowDownToLine, 
   ArrowRightFromLine,
   ArrowUpFromLine,
   Play,
   Pause,
-  Undo2,
+  StepBack,
+  StepForward,
   SlidersHorizontal,
   ChevronLeft,
   ChevronRight,
   Bug,
 } from "lucide-react";
+import { frameScopeKeyFromFrame } from "@/lib/frameScope";
+import { useFloatingPanel } from "@/components/floating-panel";
 
 interface DebugToolbarProps {
   onStepInto: () => void;
@@ -53,8 +53,8 @@ interface DebugToolbarProps {
   onNavForward?: () => void;
   onSelectFrame?: (frameId: string) => void;
   onNavigateTo?: (stepIndex: number, frameId: string) => void;
-  onRunConditionScan?: () => void;
   onStartDebug?: () => void;
+  onOpenCfgWindow?: () => void;
 }
 
 export function DebugToolbar({
@@ -72,11 +72,36 @@ export function DebugToolbar({
   onNavForward,
   onSelectFrame,
   onNavigateTo,
-  onRunConditionScan,
   onStartDebug,
+  onOpenCfgWindow,
 }: DebugToolbarProps) {
-  // 从 store 读取 data 状态
+  interface PatternCacheEntry {
+    selector: string;
+    opcodeSig: string;
+    result: MatchResult;
+  }
+  const buildOpcodeSig = (ops: Array<{ pc: number; name: string; data?: string }>): string => {
+    if (!ops.length) return "0";
+    const first = ops[0];
+    const last = ops[ops.length - 1];
+    return `${ops.length}:${first.pc}:${last.pc}:${first.name}:${last.name}`;
+  };
+
+  const toJsonSafe = (v: unknown): unknown => {
+    if (typeof v === "bigint") return v.toString();
+    if (Array.isArray(v)) return v.map(toJsonSafe);
+    if (v && typeof v === "object") {
+      const o = v as Record<string, unknown>;
+      const out: Record<string, unknown> = {};
+      for (const k of Object.keys(o)) out[k] = toJsonSafe(o[k]);
+      return out;
+    }
+    return v;
+  };
+
+  // store state
   const disabled = !useDebugStore((s) => s.stepCount);
+  const traceFinished = useDebugStore((s) => s.traceFinished);
   const isPlaying = useDebugStore((s) => s.isPlaying);
   const breakOpcodes = useDebugStore((s) => s.breakOpcodes);
   const stepCount = useDebugStore((s) => s.stepCount);
@@ -84,18 +109,27 @@ export function DebugToolbar({
   const canNavForward = useDebugStore((s) => s.canNavForward);
   const isDebug = useDebugStore((s) => s.config.isDebug);
   const pauseConditions = useDebugStore((s) => s.condNodes);
+  const tx = useDebugStore((s) => s.tx);
+  const txData = useDebugStore((s) => s.txData);
+  const blockData = useDebugStore((s) => s.blockData);
+  const rpcUrl = useDebugStore((s) => s.config.rpcUrl);
   const hasCallTree = useDebugStore((s) => s.callTreeNodes.length > 0);
   const isCallTreeOpen = useDebugStore((s) => s.isCallTreeOpen);
+  const activeTab = useDebugStore((s) => s.activeTab);
+  const callFrames = useDebugStore((s) => s.callFrames);
+  const activeFrame =
+    callFrames.find((f) => f.id === activeTab) ??
+    (callFrames.length > 0 ? callFrames[callFrames.length - 1] : undefined);
+  const activeFrameKey = activeFrame ? frameScopeKeyFromFrame(activeFrame) : "frame:unknown";
   const [showPauseOn, setShowPauseOn] = useState(false);
-  const [showCond, setShowCond] = useState(false);
   const [showFork, setShowFork] = useState(false);
-  const [showPatterns, setShowPatterns] = useState(false);
-  const [patternResults, setPatternResults] = useState<MatchResult | null>(null);
-  const [condType, setCondType] = useState<PauseConditionType>("sstore_slot");
-  const [condValue, setCondValue] = useState("");
+  const [showPatterns] = useState(false);
+  const [patternCacheByFrame, setPatternCacheByFrame] = useState<Record<string, PatternCacheEntry>>({});
   const [showProgress, setShowProgress] = useState(true);
   const [toolsCollapsed, setToolsCollapsed] = useState(false);
+  const [forkAction, setForkAction] = useState<string | undefined>(undefined);
   const forkMode = useDebugStore((s) => s.config.forkMode);
+  const isWhatIfMode = getWindowMode().mode === "whatif";
   const forkPatches = useForkStore((s) => s.patches);
   const [patchStep, setPatchStep] = useState("");
   const [patchStackPos, setPatchStackPos] = useState("");
@@ -103,7 +137,50 @@ export function DebugToolbar({
   const [patchMemOffset, setPatchMemOffset] = useState("");
   const [patchMemVal, setPatchMemVal] = useState("");
   const [diagnosticsDialogOpen, setDiagnosticsDialogOpen] = useState(false);
+  const activePatternResults = patternCacheByFrame[activeFrameKey]?.result ?? null;
   const hasSession = stepCount > 0;
+  const {
+    toggleCallTree,
+    closeCallTree,
+    openLogDrawer,
+    openUtilities,
+    openAnalysis,
+    openCondList,
+  } = useDebugUiActions();
+
+  const { showPanel } = useFloatingPanel();
+  const openCallTreeInFloating = useCallback(() => {
+    showPanel({
+      title: "Call Tree",
+      children: (
+        <div className="flex h-full min-h-0 flex-col overflow-hidden">
+          <CallTreeViewer
+            onSeekTo={onSeekToWithHistory ?? onSeekTo}
+            onSelectFrame={onSelectFrame}
+            onNavigateTo={onNavigateTo}
+            hideFloatingOpenButton
+          />
+        </div>
+      ),
+    });
+  }, [showPanel, onSeekToWithHistory, onSeekTo, onSelectFrame, onNavigateTo]);
+
+  const openFork = (inherit: boolean) => {
+    try {
+      const payload = {
+        tx,
+        txData: toJsonSafe(txData),
+        blockData: toJsonSafe(blockData),
+        rpcUrl,
+        condNodes: inherit ? pauseConditions : [],
+        forkPatches: inherit ? useForkStore.getState().patches : [],
+      };
+      const { window } = openForkWindow(payload, { readonly: true });
+      window.once("tauri://error", (e) => console.error(`[Fork Window(${inherit ? "inherit" : "blank"})] create failed:`, e));
+    } catch (e) {
+      console.error(`[Fork Window(${inherit ? "inherit" : "blank"})] create threw:`, e);
+    }
+  };
 
 
   return (
@@ -116,10 +193,10 @@ export function DebugToolbar({
         onClick={onStepOver}
         disabled={disabled || isPlaying}
         className="h-6 px-2 gap-1"
-        title="Step Over — skip sub-call, stop at next step in current frame"
+        title="Skip Call — skip sub-call, stop at next step in current frame"
       >
         <ArrowRightFromLine className="h-3 w-3" />
-        <span className="text-[11px]">Step Over</span>
+        <span className="text-[11px]">Skip Call</span>
       </Button>
       <Button
         variant="ghost"
@@ -127,10 +204,10 @@ export function DebugToolbar({
         onClick={onStepOut}
         disabled={disabled || isPlaying}
         className="h-6 px-2 gap-1"
-        title="Step Out — finish current frame, return to parent frame"
+        title="Frame Out — finish current frame, return to parent frame"
       >
         <ArrowUpFromLine className="h-3 w-3" />
-        <span className="text-[11px]">Step Out</span>
+        <span className="text-[11px]">Frame Out</span>
       </Button>
 
       <div className="w-px h-6 bg-border mx-1" />
@@ -140,21 +217,10 @@ export function DebugToolbar({
         onClick={onStepBack}
         disabled={disabled || isPlaying}
         className="h-6 px-2 gap-1"
-        title="Step Back"
+        title="Last"
       >
-        <Undo2 className="h-3 w-3" />
-        <span className="text-[11px]">Step Back</span>
-      </Button>
-      <Button
-        variant="ghost"
-        size="sm"
-        onClick={onStepInto}
-        disabled={disabled || isPlaying}
-        className="h-6 px-2 gap-1"
-        title="Step Into (F11)"
-      >
-        <ArrowDownToLine className="h-3 w-3" />
-        <span className="text-[11px]">Step Into</span>
+        <StepBack className="h-3 w-3" />
+        <span className="text-[11px]">Last</span>
       </Button>
 
       <Button
@@ -177,7 +243,17 @@ export function DebugToolbar({
           </>
         )}
       </Button>
-      <div className="w-px h-6 bg-border mx-1" />
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={onStepInto}
+        disabled={disabled || isPlaying}
+        className="h-6 px-2 gap-1"
+        title="Next (F11)"
+      >
+        <StepForward className="h-3 w-3" />
+        <span className="text-[11px]">Next</span>
+      </Button>
 
       <Button
         variant={showProgress ? "secondary" : "ghost"}
@@ -189,6 +265,7 @@ export function DebugToolbar({
         <SlidersHorizontal className="h-3 w-3" />
       </Button>
 
+      <div className="w-px h-6 bg-border mx-1" />
       <Button
         variant={showPauseOn ? "secondary" : "ghost"}
         size="sm"
@@ -199,18 +276,8 @@ export function DebugToolbar({
         <span className="text-[11px]">PauseOp</span>
       </Button>
 
-      <Button
-        variant={showCond ? "secondary" : "ghost"}
-        size="sm"
-        onClick={() => setShowCond(v => !v)}
-        className="h-6 px-2"
-        title="Add conditional pause"
-      >
-        <span className="text-[11px]">PauseCond</span>
-      </Button>
-
       <div className="w-px h-6 bg-border mx-0.5" />
-      <Button
+      {/* <Button
         variant={showPatterns ? "secondary" : "ghost"}
         size="sm"
         onClick={() => setShowPatterns(v => !v)}
@@ -218,11 +285,28 @@ export function DebugToolbar({
         title="Pattern matcher for function calls and patterns"
       >
         <span className="text-[11px]">Patterns</span>
-      </Button>
+      </Button> */}
 
       <div className="w-px h-6 bg-border mx-0.5" />
 
-      {forkMode && (
+      <Select
+        value={forkAction}
+        onValueChange={(v) => {
+          setForkAction(v);
+          openFork(v === "inherit");
+          setTimeout(() => setForkAction(undefined), 0);
+        }}
+      >
+        <SelectTrigger className="h-6 w-[60px] px-2 text-[11px]" title="Open fork/whatif window">
+          <SelectValue placeholder="Fork" />
+        </SelectTrigger>
+        <SelectContent className="w-[60px] min-w-0 p-1 text-[11px]">
+          <SelectItem value="blank" className="h-6 pl-1.5 pr-0.5 text-[11px]">Blank</SelectItem>
+          <SelectItem value="inherit" className="h-6 pl-1.5 pr-0.5 text-[11px]">Inheirt</SelectItem>
+        </SelectContent>
+      </Select>
+
+      {forkMode && isWhatIfMode && (
         <Button
           variant={showFork ? "secondary" : "ghost"}
           size="sm"
@@ -283,7 +367,7 @@ export function DebugToolbar({
       <Button
         variant={isCallTreeOpen ? "secondary" : "ghost"}
         size="sm"
-        onClick={() => { const s = useDebugStore.getState(); s.sync({ isCallTreeOpen: !s.isCallTreeOpen }); }}
+        onClick={toggleCallTree}
         className="h-6 px-2 text-[11px]"
         title="Call Tree"
         disabled={!hasCallTree}
@@ -293,32 +377,71 @@ export function DebugToolbar({
       <Button
         variant="ghost"
         size="sm"
-        onClick={() => useDebugStore.getState().sync({ isLogDrawerOpen: true })}
+        onClick={openLogDrawer}
         className="h-6 px-2 text-[11px]"
         title="All Logs (l)"
         disabled={disabled}
       >
         Logs
       </Button>
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={openCondList}
+        className="h-6 px-2 relative text-[11px]"
+        title="Scan — build conditions, scan trace, jump to hits"
+      >
+        Scan
+        {pauseConditions.length > 0 && (
+          <span className="absolute -top-0.5 -right-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-primary text-[9px] leading-none text-primary-foreground">
+            {pauseConditions.reduce((sum, n) => {
+              const count = (node: (typeof pauseConditions)[0]): number =>
+                node.kind === "leaf" ? 1 : count(node.left) + count(node.right);
+              return sum + count(n);
+            }, 0)}
+          </span>
+        )}
+      </Button>
       <div className="w-px h-6 bg-border mx-1" />
 
       <Button
-        variant="outline"
+        variant="ghost"
         size="sm"
-        onClick={() => useDebugStore.getState().sync({ isUtilitiesOpen: true })}
+        onClick={openUtilities}
         className="h-6 px-2 text-[11px]"
         title="Utilities (BaseConv, 4Byte, Keccak256)"
       >
         Utils
       </Button>
       <Button
-        variant="outline"
+        variant="ghost"
         size="sm"
-        onClick={() => useDebugStore.getState().sync({ isAnalysisOpen: true })}
+        onClick={openAnalysis}
         className="h-6 px-2 text-[11px]"
         title="Analysis (JS sandbox)"
       >
         Analysis
+      </Button>
+      {/* <Button
+        variant="ghost"
+        size="sm"
+        onClick={() => openSymbolicSolve()}
+        className="h-6 px-2 text-[11px]"
+        title="符号求解 (Z3) — 求满足指定 JUMPI 条件的 calldata"
+        disabled={disabled}
+      >
+        Sym
+      </Button> */}
+
+      <Button
+        variant="ghost"
+        size="sm"
+        onClick={onOpenCfgWindow}
+        className="h-6 px-2 text-[11px]"
+        title={traceFinished ? "Open CFG window" : "Wait until trace has finished loading"}
+        disabled={!onOpenCfgWindow || !traceFinished}
+      >
+        Cfg
       </Button>
       {/* Notes button — hidden until feature is complete
       <Button
@@ -334,7 +457,7 @@ export function DebugToolbar({
       </>)}
       </div>
 
-      {/* Break Opcodes 多选 */}
+      {/* Break opcodes */}
       {showPauseOn && (() => {
         const BREAK_OPCODE_OPTIONS: { opcode: number | number[]; name: string }[] = [
           { opcode: 0xfd, name: "REVERT" },
@@ -385,98 +508,7 @@ export function DebugToolbar({
         );
       })()}
 
-      {/* 条件断点内联添加行 */}
-      {showCond && (() => {
-        // 叶子总数 = 所有根节点的叶子和
-        const totalLeaves = pauseConditions.reduce((sum, n) => {
-          const count = (node: typeof n): number =>
-            node.kind === 'leaf' ? 1 : count(node.left) + count(node.right);
-          return sum + count(n);
-        }, 0);
-        const canAdd = totalLeaves < 3;
-        const placeholders: Record<PauseConditionType, string> = {
-          sstore_slot:      "slot (0x... 或十进制)",
-          sload_slot:       "slot (0x... 或十进制)",
-          call_address:     "address (0x...)",
-          call_selector:    "selector (0x12345678)",
-          log_topic:        "topic0 (0x...)",
-          contract_address: "address (0x...)",
-          target_address:   "address (0x...)",
-        };
-        return (
-        <div className="flex items-center gap-1.5 px-2 py-1 border-b bg-muted/30 flex-wrap">
-          <span className="text-xs text-muted-foreground shrink-0">Cond:</span>
-          <Select value={condType} onValueChange={v => setCondType(v as PauseConditionType)}>
-            <SelectTrigger className="h-6 text-xs w-36 px-2">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {(Object.entries(PAUSE_CONDITION_LABELS) as [PauseConditionType, string][]).map(([k, v]) => (
-                <SelectItem key={k} value={k} className="text-xs">{v}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Input
-            value={condValue}
-            onChange={e => setCondValue(e.target.value)}
-            placeholder={placeholders[condType]}
-            className="h-6 text-xs font-mono w-[22rem]"
-            onKeyDown={e => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                const trimmed = condValue.trim();
-                if (!trimmed || !canAdd) return;
-                const cond: PauseCondition = { id: crypto.randomUUID(), type: condType, value: trimmed, enabled: true };
-                const node = { kind: 'leaf' as const, id: cond.id, cond };
-                useDebugStore.getState().sync({ condNodes: [...pauseConditions, node] });
-                setCondValue("");
-              }
-            }}
-          />
-          <Button
-            size="sm"
-            className="h-6 px-2 text-xs"
-            disabled={!canAdd}
-            title={canAdd ? undefined : '最多 3 个条件'}
-            onClick={() => {
-              const trimmed = condValue.trim();
-              if (!trimmed || !canAdd) return;
-              const cond: PauseCondition = { id: crypto.randomUUID(), type: condType, value: trimmed, enabled: true };
-              const node = { kind: 'leaf' as const, id: cond.id, cond };
-              useDebugStore.getState().sync({ condNodes: [...pauseConditions, node] });
-              setCondValue("");
-            }}
-          >
-            + Add
-          </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => useDebugStore.getState().sync({ isCondListOpen: true })}
-            className="h-6 px-2 relative"
-            title="View condition list"
-          >
-            <span className="text-[11px]">CondList</span>
-            {pauseConditions.length > 0 && (
-              <span className="absolute -top-0.5 -right-0.5 h-3.5 w-3.5 text-[9px] bg-primary text-primary-foreground rounded-full flex items-center justify-center leading-none">
-                {totalLeaves}
-              </span>
-            )}
-          </Button>
-          <Button
-            size="sm"
-            className="h-6 px-2 text-xs ml-3"
-            onClick={() => onRunConditionScan?.()}
-            title="Scan conditions"
-            disabled={disabled || pauseConditions.length === 0}
-          >
-            Scan
-          </Button>
-        </div>
-        );
-      })()}
-
-      {/* Pattern Matcher — 识别函数调用模式 */}
+      {/* Pattern matcher */}
       {showPatterns && (() => {
         const patternOptions = [
           { id: 'call_func', label: 'CallFunc', description: 'Function call pattern: PUSH4 EQ PUSH1 JUMPI' },
@@ -488,54 +520,64 @@ export function DebugToolbar({
               <Button
                 key={id}
                 size="sm"
-                variant={patternResults?.pc.length ? "default" : "outline"}
+                variant={activePatternResults?.pc.length ? "default" : "outline"}
                 className="h-6 px-2 text-xs"
                 title={description}
                 onClick={() => {
                   const state = useDebugStore.getState();
-                  const instructionStrings = state.opcodes.map(op => 
+                  const currentFrame =
+                    state.callFrames.find((f) => f.id === state.activeTab) ??
+                    (state.callFrames.length > 0 ? state.callFrames[state.callFrames.length - 1] : undefined);
+                  const frameKey = currentFrame ? frameScopeKeyFromFrame(currentFrame) : "frame:unknown";
+                  const frameOpcodes = currentFrame?.opcodes ?? state.opcodes;
+                  const instructionStrings = frameOpcodes.map(op =>
                     op.data ? `${op.name} ${op.data}` : op.name
                   );
+                  const opcodeSig = buildOpcodeSig(frameOpcodes);
                   
-                  // 从当前调用帧的 input (calldata) 中提取 selector（前 10 位：0x + 8 hex chars）
+                  // selector from current frame calldata
                   let selector: string | undefined;
-                  if (state.callFrames && state.callFrames.length > 0) {
-                    const currentFrame = state.callFrames[state.callFrames.length - 1];
-                    if (currentFrame.input && currentFrame.input.length >= 10) {
-                      selector = currentFrame.input.slice(0, 10);
-                    }
+                  if (currentFrame?.input && currentFrame.input.length >= 10) {
+                    selector = currentFrame.input.slice(0, 10);
+                  }
+                  const selectorKey = selector ?? "";
+
+                  const cached = patternCacheByFrame[frameKey];
+                  if (cached && cached.selector === selectorKey && cached.opcodeSig === opcodeSig) {
+                    console.log("Pattern cache hit:", { frameKey, selector: selectorKey, opcodeSig });
+                    return;
                   }
                   
                   const results = findCallPatterns(instructionStrings, selector);
                   // 将索引转换为实际的 PC 地址
                   const pcResults = {
-                    pc: results.pc.map(index => state.opcodes[index].pc),
+                    pc: results.pc.map(index => frameOpcodes[index].pc),
                     matches: results.matches
                   };
-                  console.log("Pattern match results:", pcResults, "selector:", selector);
-                  setPatternResults(pcResults);
+                  console.log("Pattern match results:", pcResults, "selector:", selector, "frame:", frameKey);
+                  setPatternCacheByFrame((prev) => ({
+                    ...prev,
+                    [frameKey]: {
+                      selector: selectorKey,
+                      opcodeSig,
+                      result: pcResults,
+                    },
+                  }));
                 }}
               >
-                {label} {patternResults?.pc.length ? `(${patternResults.pc.length})` : ""}
+                {label} {activePatternResults?.pc.length ? `(${activePatternResults.pc.length})` : ""}
               </Button>
             ))}
-            {patternResults?.pc.length ? (
+            {activePatternResults?.pc.length ? (
               <div className="flex items-center gap-1 ml-2 pl-2 border-l">
                 <span className="text-xs text-muted-foreground">Found at PC:</span>
                 <div className="flex gap-1 flex-wrap max-w-sm">
-                  {patternResults.pc.map((pc) => (
+                  {activePatternResults.pc.map((pc) => (
                     <Button
                       key={pc}
                       size="sm"
-                      variant="ghost"
-                      className="h-5 px-1.5 text-[10px] font-mono hover:bg-accent"
-                      onClick={() => {
-                        const state = useDebugStore.getState();
-                        const stepIndex = state.opcodes.findIndex(op => op.pc === pc);
-                        if (stepIndex >= 0) {
-                          state.sync({ currentStepIndex: stepIndex });
-                        }
-                      }}
+                      variant="outline"
+                      className="h-5 px-1.5 text-[10px] font-mono cursor-default"
                     >
                       0x{pc.toString(16).padStart(4, '0')}
                     </Button>
@@ -547,42 +589,42 @@ export function DebugToolbar({
         );
       })()}
 
-      {/* Fork Patch Editor — 可收缩 */}
-      {showFork && forkMode && (
+      {/* Fork patch editor */}
+      {showFork && forkMode && isWhatIfMode && (
         <div className="flex flex-col border-b bg-muted/30">
           <div className="flex items-center gap-1.5 px-2 py-1 flex-wrap">
             <span className="text-xs text-muted-foreground shrink-0">Patch:</span>
             <Input
-              className="h-5 text-[11px] w-20"
+              className="h-6 text-xs w-24"
               placeholder="step"
               value={patchStep}
               onChange={(e) => setPatchStep(e.target.value)}
             />
             <Input
-              className="h-5 text-[11px] w-16"
+              className="h-6 text-xs w-20"
               placeholder="stack pos"
               value={patchStackPos}
               onChange={(e) => setPatchStackPos(e.target.value)}
             />
             <Input
-              className="h-5 text-[11px] w-48"
+              className="h-6 text-xs w-56"
               placeholder="stack value (0x...)"
               value={patchStackVal}
               onChange={(e) => setPatchStackVal(e.target.value)}
             />
             <Input
-              className="h-5 text-[11px] w-20"
+              className="h-6 text-xs w-24"
               placeholder="mem offset"
               value={patchMemOffset}
               onChange={(e) => setPatchMemOffset(e.target.value)}
             />
             <Input
-              className="h-5 text-[11px] w-48"
+              className="h-6 text-xs w-56"
               placeholder="mem data (0x...)"
               value={patchMemVal}
               onChange={(e) => setPatchMemVal(e.target.value)}
             />
-            <Button size="sm" className="h-5 px-2 text-[10px]" onClick={() => {
+            <Button size="sm" className="h-6 px-2 text-xs" onClick={() => {
               const stepIdx = parseInt(patchStep, 10);
               if (isNaN(stepIdx) || stepIdx < 1) { toast.error("Invalid step (1-based)"); return; }
               const stackPatches: { pos: number; value: string }[] = [];
@@ -608,8 +650,8 @@ export function DebugToolbar({
             }}>
               + Add
             </Button>
-            <Button size="sm" variant="default" className="h-5 px-2 text-[10px] bg-orange-500 hover:bg-orange-600 text-white font-semibold" onClick={() => onStartDebug?.()} title="重跑">
-              ↺ ForkRun
+            <Button size="sm" variant="outline" className="h-6 px-2 text-xs bg-white hover:bg-gray-50 text-black" onClick={() => onStartDebug?.()} title="Rerun">
+              ForkRun
             </Button>
           </div>
           {forkPatches.length > 0 && (
@@ -692,19 +734,22 @@ export function DebugToolbar({
         </div>
       )}
 
-    {/* Call Tree Sheet — 从底部弹出，占半屏 */}
-    <Sheet open={isCallTreeOpen} onOpenChange={(o) => { if (!o) useDebugStore.getState().sync({ isCallTreeOpen: false }); }}>
-      <SheetContent side="bottom" className="h-[50vh] flex flex-col p-0 [&>button]:hidden border-t border-border shadow-[0_-4px_12px_rgba(0,0,0,0.18)]" aria-describedby={undefined}>
-        <SheetTitle className="sr-only">Call Tree</SheetTitle>
+    {/* Bottom call tree sheet */}
+    <BottomSheetShell
+      open={isCallTreeOpen}
+      onOpenChange={(o) => { if (!o) closeCallTree(); }}
+      sheetTitle="Call Tree"
+      defaultHeightVh={50}
+    >
         <div className="flex-1 min-h-0 overflow-hidden">
           <CallTreeViewer
             onSeekTo={onSeekToWithHistory ?? onSeekTo}
             onSelectFrame={onSelectFrame}
             onNavigateTo={onNavigateTo}
+            onOpenInFloating={hasCallTree ? openCallTreeInFloating : undefined}
           />
         </div>
-      </SheetContent>
-    </Sheet>
+    </BottomSheetShell>
 
     <ShadowDiagnosticsDialog open={diagnosticsDialogOpen} onOpenChange={setDiagnosticsDialogOpen} />
     </>
