@@ -10,14 +10,46 @@ interface ProgressBarProps {
   onSpeedChange: (speed: number) => void;
 }
 
-/** 多笔：叠在滑条上的点（absolute，不占额外布局）；近重合为一颗点（位置取簇中心，跳转取最左 tx） */
+/** 多笔：叠在滑条上的点（absolute，不占额外布局） */
 interface TxJumpDot {
   pct: number;
   step: number;
   title: string;
 }
 
-const TX_DOT_OVERLAP_THRESH_PCT = 1.2;
+const TX_DOT_MIN_GAP_PCT = 1.8;
+const TX_DOT_DIAMETER_PX = 8; // h-2 w-2
+
+function enforceMinPctGap(dots: TxJumpDot[], minGapPct: number): TxJumpDot[] {
+  if (dots.length <= 1) return dots;
+  const gap = Math.max(0, minGapPct);
+  const out = dots.map((d) => ({ ...d }));
+
+  // Forward pass: ensure out[i] - out[i-1] >= gap
+  for (let i = 1; i < out.length; i++) {
+    const minAllowed = out[i - 1].pct + gap;
+    if (out[i].pct < minAllowed) {
+      out[i].pct = minAllowed;
+    }
+  }
+
+  // Backward pass: keep right boundary <= 100 and preserve gap
+  if (out[out.length - 1].pct > 100) {
+    out[out.length - 1].pct = 100;
+    for (let i = out.length - 2; i >= 0; i--) {
+      const maxAllowed = out[i + 1].pct - gap;
+      if (out[i].pct > maxAllowed) {
+        out[i].pct = maxAllowed;
+      }
+    }
+  }
+
+  // Final clamp in case data is extremely dense.
+  for (let i = 0; i < out.length; i++) {
+    out[i].pct = Math.max(0, Math.min(100, out[i].pct));
+  }
+  return out;
+}
 
 /** 滑条下方一行：图标垂直居中于条内 */
 function txMarkerRowStyle(pct: number): CSSProperties {
@@ -58,6 +90,8 @@ export function ProgressBar({
   const [rangeStartInput, setRangeStartInput] = useState("");
   const [rangeEndInput, setRangeEndInput] = useState("");
   const [popoverOpen, setPopoverOpen] = useState(false);
+  const sliderWrapRef = useRef<HTMLDivElement | null>(null);
+  const [txDotMinGapPct, setTxDotMinGapPct] = useState(TX_DOT_MIN_GAP_PCT);
   const sync = useDebugStore.getState().sync;
   const setRangeStart = useCallback((v: number) => sync({ rangeStart: v }), [sync]);
   const setRangeEnd = useCallback((v: number) => sync({ rangeEnd: v }), [sync]);
@@ -95,6 +129,23 @@ export function ProgressBar({
       setRange(0, stepCount - 1);
     }
   }, [stepCount, setRange]);
+
+  // 基于实际宽度计算“刚好相邻”的最小间距（百分比）
+  useEffect(() => {
+    const el = sliderWrapRef.current;
+    if (!el) return;
+    const updateGap = () => {
+      const w = el.clientWidth;
+      if (w <= 0) return;
+      const pct = (TX_DOT_DIAMETER_PX / w) * 100;
+      // 预留一个很小的视觉安全边，避免亚像素时看起来仍重叠
+      setTxDotMinGapPct(Math.max(0.01, pct + 0.02));
+    };
+    updateGap();
+    const ro = new ResizeObserver(updateGap);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // 滑块值显示：拖动中用本地值，松开后用 store 值
   const displayValue = draggingValue ?? currentStepIndex;
@@ -137,37 +188,13 @@ export function ProgressBar({
       return true;
     });
     if (points.length === 0) return [];
-
-    const out: TxJumpDot[] = [];
-    let i = 0;
-    while (i < points.length) {
-      const start = i;
-      let j = i + 1;
-      while (
-        j < points.length &&
-        points[j].pct - points[j - 1].pct < TX_DOT_OVERLAP_THRESH_PCT
-      ) {
-        j += 1;
-      }
-      const slice = points.slice(start, j);
-      if (slice.length === 1) {
-        const p = slice[0];
-        out.push({ pct: p.pct, step: p.step, title: p.title });
-      } else {
-        const minPct = slice[0].pct;
-        const maxPct = slice[slice.length - 1].pct;
-        const pct = (minPct + maxPct) / 2;
-        const step = Math.min(...slice.map((s) => s.step));
-        out.push({
-          pct,
-          step,
-          title: slice.map((s) => s.title).join(" · "),
-        });
-      }
-      i = j;
-    }
-    return out;
-  }, [txBoundaries, stepCount]);
+    const out: TxJumpDot[] = points.map((p) => ({
+      pct: p.pct,
+      step: p.step,
+      title: p.title,
+    }));
+    return enforceMinPctGap(out, txDotMinGapPct);
+  }, [txBoundaries, stepCount, txDotMinGapPct]);
 
   const handleSliderChange = ([v]: number[]) => {
     setDraggingValue(v);
@@ -313,7 +340,7 @@ export function ProgressBar({
       </div>
 
       {/* Slider；多笔圆点 absolute 叠在滑条下方，不占布局高度 */}
-      <div className="relative min-w-[80px] flex-1 overflow-visible">
+      <div ref={sliderWrapRef} className="relative min-w-[80px] flex-1 overflow-visible">
         {rangeEnabled ? (
           <Slider
             className="relative z-0 w-full [&_[data-index='0']]:h-2.5 [&_[data-index='0']]:w-2.5 [&_[data-index='0']]:border-orange-400 [&_[data-index='2']]:h-2.5 [&_[data-index='2']]:w-2.5 [&_[data-index='2']]:border-orange-400 [&_[data-index='1']]:z-10"

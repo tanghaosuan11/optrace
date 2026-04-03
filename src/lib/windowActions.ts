@@ -4,6 +4,9 @@ export type ForkInitPayload = {
   tx?: string;
   txData?: unknown;
   blockData?: unknown;
+  txDataList?: unknown;
+  txSlots?: unknown;
+  debugByTx?: boolean;
   condNodes?: unknown;
   forkPatches?: unknown;
   rpcUrl?: string;
@@ -43,6 +46,13 @@ export function openForkWindow(payload: ForkInitPayload, opts?: { readonly?: boo
       hasTx: !!init.tx,
       hasTxData: !!init.txData,
       hasBlockData: !!init.blockData,
+      txDataListLen: Array.isArray((init as { txDataList?: unknown[] }).txDataList)
+        ? (init as { txDataList?: unknown[] }).txDataList?.length
+        : undefined,
+      txSlotsLen: Array.isArray((init as { txSlots?: unknown[] }).txSlots)
+        ? (init as { txSlots?: unknown[] }).txSlots?.length
+        : undefined,
+      debugByTx: (init as { debugByTx?: boolean }).debugByTx,
       condNodesLen: Array.isArray((init as any).condNodes) ? (init as any).condNodes.length : undefined,
       forkPatchesLen: Array.isArray((init as any).forkPatches) ? (init as any).forkPatches.length : undefined,
     });

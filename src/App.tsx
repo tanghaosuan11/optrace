@@ -21,7 +21,7 @@ import { Toaster } from "@/components/ui/sonner";
 import "./App.css";
 import { type CallFrame, type CallTreeNode } from "./lib/types";
 import { useDebugPlayback } from "./hooks/useDebugPlayback";
-import { type TxData, type BlockData } from "./lib/txFetcher";
+import { type TxData, type BlockData, type TxListRow, type TxSlot } from "./lib/txFetcher";
 import { loadAppConfig, initAppConfig, setConfig } from "./lib/appConfig";
 import { useDebugStore } from "./store/debugStore";
 import { startDebugAction, resetAllAction, debugDump } from "./lib/debugActions";
@@ -143,16 +143,30 @@ function App() {
   // Window init payload (fork/whatif)
   useEffect(() => {
     const w = getCurrentWindow();
-    const unlistenP = w.listen<{ tx?: string; txData?: TxData; blockData?: BlockData; condNodes?: unknown; forkPatches?: unknown; rpcUrl?: string }>(
+    const unlistenP = w.listen<{
+      tx?: string;
+      txData?: TxData;
+      blockData?: BlockData;
+      txDataList?: TxListRow[];
+      txSlots?: TxSlot[];
+      debugByTx?: boolean;
+      condNodes?: unknown;
+      forkPatches?: unknown;
+      rpcUrl?: string;
+    }>(
       "optrace:init",
       (ev) => {
         const p = ev.payload || {};
+        const hasTxDataList = Array.isArray(p.txDataList) && p.txDataList.length > 0;
         whatIfInitReceivedRef.current = true;
         console.log("[whatif.init] received optrace:init", {
           isWhatIfMode,
           hasTx: !!p.tx,
           hasTxData: !!p.txData,
           hasBlockData: !!p.blockData,
+          txDataListLen: hasTxDataList ? p.txDataList!.length : 0,
+          txSlotsLen: Array.isArray(p.txSlots) ? p.txSlots.length : 0,
+          debugByTx: p.debugByTx,
           condNodesLen: Array.isArray((p as any).condNodes) ? (p as any).condNodes.length : undefined,
           forkPatchesLen: Array.isArray((p as any).forkPatches) ? (p as any).forkPatches.length : undefined,
           rpcUrl: p.rpcUrl ? "(set)" : "(unset)",
@@ -173,11 +187,15 @@ function App() {
                 isFetching: false,
               },
             ],
+            ...(hasTxDataList ? { txDataList: p.txDataList as TxListRow[], debugByTx: false } : {}),
+            ...(Array.isArray(p.txSlots) ? { txSlots: p.txSlots as TxSlot[], debugByTx: !!p.debugByTx } : {}),
           });
         } else {
           if (p.tx) storeSync({ tx: p.tx });
           if (p.txData) storeSync({ txData: p.txData as TxData });
           if (p.blockData) storeSync({ blockData: p.blockData as BlockData });
+          if (hasTxDataList) storeSync({ txDataList: p.txDataList as TxListRow[], debugByTx: false });
+          if (Array.isArray(p.txSlots)) storeSync({ txSlots: p.txSlots as TxSlot[], debugByTx: !!p.debugByTx });
         }
         if (p.condNodes) storeSync({ condNodes: p.condNodes as any });
         if (p.forkPatches) useForkStore.setState({ patches: p.forkPatches as any });
@@ -190,7 +208,7 @@ function App() {
         }
         const missing: string[] = [];
         if (!p.tx) missing.push("tx");
-        if (!p.txData) missing.push("txData");
+        if (!p.txData && !hasTxDataList) missing.push("txData/txDataList");
         if (!p.blockData) missing.push("blockData");
         if (missing.length > 0) {
           setWhatIfInitStatus(`Init payload missing required fields: ${missing.join(", ")}`);

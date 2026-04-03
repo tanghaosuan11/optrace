@@ -112,6 +112,9 @@ export function DebugToolbar({
   const tx = useDebugStore((s) => s.tx);
   const txData = useDebugStore((s) => s.txData);
   const blockData = useDebugStore((s) => s.blockData);
+  const txDataList = useDebugStore((s) => s.txDataList);
+  const txSlots = useDebugStore((s) => s.txSlots);
+  const debugByTx = useDebugStore((s) => s.debugByTx);
   const rpcUrl = useDebugStore((s) => s.config.rpcUrl);
   const hasCallTree = useDebugStore((s) => s.callTreeNodes.length > 0);
   const isCallTreeOpen = useDebugStore((s) => s.isCallTreeOpen);
@@ -171,6 +174,9 @@ export function DebugToolbar({
         tx,
         txData: toJsonSafe(txData),
         blockData: toJsonSafe(blockData),
+        txDataList: toJsonSafe(txDataList),
+        txSlots: toJsonSafe(txSlots),
+        debugByTx,
         rpcUrl,
         condNodes: inherit ? pauseConditions : [],
         forkPatches: inherit ? useForkStore.getState().patches : [],
@@ -287,24 +293,27 @@ export function DebugToolbar({
         <span className="text-[11px]">Patterns</span>
       </Button> */}
 
-      <div className="w-px h-6 bg-border mx-0.5" />
-
-      <Select
-        value={forkAction}
-        onValueChange={(v) => {
-          setForkAction(v);
-          openFork(v === "inherit");
-          setTimeout(() => setForkAction(undefined), 0);
-        }}
-      >
-        <SelectTrigger className="h-6 w-[60px] px-2 text-[11px]" title="Open fork/whatif window">
-          <SelectValue placeholder="Fork" />
-        </SelectTrigger>
-        <SelectContent className="w-[60px] min-w-0 p-1 text-[11px]">
-          <SelectItem value="blank" className="h-6 pl-1.5 pr-0.5 text-[11px]">Blank</SelectItem>
-          <SelectItem value="inherit" className="h-6 pl-1.5 pr-0.5 text-[11px]">Inheirt</SelectItem>
-        </SelectContent>
-      </Select>
+      {forkMode && (
+        <>
+          <div className="w-px h-6 bg-border mx-0.5" />
+          <Select
+            value={forkAction}
+            onValueChange={(v) => {
+              setForkAction(v);
+              openFork(v === "inherit");
+              setTimeout(() => setForkAction(undefined), 0);
+            }}
+          >
+            <SelectTrigger className="h-6 w-[60px] px-2 text-[11px]" title="Open fork/whatif window">
+              <SelectValue placeholder="Fork" />
+            </SelectTrigger>
+            <SelectContent className="w-[60px] min-w-0 p-1 text-[11px]">
+              <SelectItem value="blank" className="h-6 pl-1.5 pr-0.5 text-[11px]">Blank</SelectItem>
+              <SelectItem value="inherit" className="h-6 pl-1.5 pr-0.5 text-[11px]">Inheirt</SelectItem>
+            </SelectContent>
+          </Select>
+        </>
+      )}
 
       {forkMode && isWhatIfMode && (
         <Button
