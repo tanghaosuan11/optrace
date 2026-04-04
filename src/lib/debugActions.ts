@@ -181,9 +181,6 @@ export async function startDebugAction(deps: StartDebugDeps) {
     return;
   }
 
-  if (!tx) { console.log("tx is empty"); return; }
-  if (tx.length < 64) { console.log("tx is too short"); return; }
-
   const chainReady = consecutiveTxSlotsReady(txSlots);
   const fromDataList = txDataList.filter(isValidTxListRow).map(txListRowToBackend);
 
@@ -200,6 +197,8 @@ export async function startDebugAction(deps: StartDebugDeps) {
   }
 
   const canDataSingle = !debugByTx && multiPayload.length === 1;
+  // 手填（列表 1 笔或多笔）：不传链上 tx 哈希
+  const isHandFill = !debugByTx && (multiPayload.length >= 2 || canDataSingle);
   const canStart =
     multiPayload.length >= 2 ||
     canDataSingle ||
@@ -209,31 +208,60 @@ export async function startDebugAction(deps: StartDebugDeps) {
     return;
   }
 
-  // 多交易：blockData 三态校验
-  // - 全空：不传给后端（后端将自行从链上读取）
-  // - 全齐：传给后端（用于“当前块环境”：basefee/timestamp/...）
-  // - 缺一项：直接报错并中止（避免前后端对环境块含义不一致）
-  let backendBlockForMulti: ReturnType<typeof buildBackendBlockDataOrThrow> = {};
-  if (multiPayload.length >= 2) {
+  if (!isHandFill) {
+    if (!tx) {
+      console.log("tx is empty");
+      return;
+    }
+    if (tx.length < 64) {
+      console.log("tx is too short");
+      return;
+    }
+  }
+
+  // 手填要带齐 block；按 Tx 多笔时块可全空，后端用链上推断
+  let blockInvokePayload: ReturnType<typeof buildBackendBlockDataOrThrow> = {};
+  if (!debugByTx) {
+    const b = blockData;
+    const allEmpty =
+      !b ||
+      (b.blockNumber == null &&
+        b.timestamp == null &&
+        b.gasLimit == null &&
+        b.baseFeePerGas == null);
+    if (allEmpty) {
+      toast.error("Manual mode: set block number, timestamp, gas limit, and base fee.");
+      return;
+    }
     try {
-      backendBlockForMulti = buildBackendBlockDataOrThrow(blockData);
+      blockInvokePayload = buildBackendBlockDataOrThrow(blockData);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       toast.error(msg);
       sync({ txError: msg });
-      deps.runtime.startDebugInFlight = false;
+      return;
+    }
+  } else if (multiPayload.length >= 2) {
+    try {
+      blockInvokePayload = buildBackendBlockDataOrThrow(blockData);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      toast.error(msg);
+      sync({ txError: msg });
       return;
     }
   }
+
   deps.runtime.startDebugInFlight = true;
 
   let txHash = tx;
-  if (tx.startsWith("0x")) {
+  if (!isHandFill && tx.startsWith("0x")) {
     txHash = tx.slice(2);
     sync({ tx: txHash });
   }
+  const txForInvoke = isHandFill ? "" : txHash;
 
-  console.log("开始调试，txHash:", txHash);
+  console.log("[startDebug]", { tx: txForInvoke || "(empty)", isHandFill });
   markDebugPerfStart(deps.runtime);
 
   sync({ currentDebugChainId: getSelectedChain() });
@@ -259,7 +287,7 @@ export async function startDebugAction(deps: StartDebugDeps) {
   deps.setCurrentStepIndex(-1);
   deps.setIsPlaying(false);
 
-  console.log("准备调试数据:", { txHash, txData, blockData, multiCount: multiPayload.length });
+  console.log("[startDebug] payload", { tx: txForInvoke || txHash, multiCount: multiPayload.length, isHandFill });
 
   try {
     const invokeStart = performance.now();
@@ -281,10 +309,11 @@ export async function startDebugAction(deps: StartDebugDeps) {
 
     if (multiPayload.length >= 2) {
       await invoke("op_trace", {
-        tx: txHash,
+        tx: txForInvoke,
+        handFill: isHandFill,
         sessionId: deps.sessionId,
         txDataList: multiPayload,
-        ...backendBlockForMulti,
+        ...blockInvokePayload,
         ...backendConfig,
         readonly,
         patches,
@@ -292,11 +321,12 @@ export async function startDebugAction(deps: StartDebugDeps) {
       });
     } else if (canDataSingle) {
       await invoke("op_trace", {
-        tx: txHash,
+        tx: txForInvoke,
+        handFill: true,
         sessionId: deps.sessionId,
         txData: multiPayload[0],
         txDataList: null,
-        blockData: null,
+        ...blockInvokePayload,
         ...backendConfig,
         readonly,
         patches,
@@ -330,6 +360,7 @@ export async function startDebugAction(deps: StartDebugDeps) {
 
       await invoke("op_trace", {
         tx: txHash,
+        handFill: false,
         sessionId: deps.sessionId,
         txData: txDebugData,
         blockData: blockDebugData,

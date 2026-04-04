@@ -446,6 +446,7 @@ pub async fn op_trace(
     enable_shadow: bool,
     readonly: bool,
     patches: Vec<StatePatch>,
+    hand_fill: bool,
     channel: Channel,
     app_handle: AppHandle,
     session_state: Arc<Mutex<std::collections::HashMap<String, super::debug_session::SessionEntry>>>,
@@ -485,21 +486,28 @@ pub async fn op_trace(
 
     let chain_id = provider.get_chain_id().await.unwrap_or(1);
 
-    let tx_chain_data = provider
-        .get_transaction_by_hash(tx.parse()?)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("transaction not found for hash {}", tx))?;
-    // 说明：
-    // - `state_block_num`：用于历史状态读取（AlloyDB/CacheDB），应为「父块」；
-    //   这样读到的是交易执行前/块内执行前的状态，不会拿到执行后的 state。
-    // - `exec_block_num`：用于 EVM 的区块环境（BlockEnv：basefee/timestamp/number/...），应为「当前块」。
-    let chain_exec_block_num: u64 = tx_chain_data.block_number().unwrap();
-    // 若前端传入 block_data，则以其 `number` 作为“当前块”执行环境的块号；
-    // 并据此推导 state_block_num = exec_block_num - 1，实现“环境用当前块、状态读父块”的解耦。
-    let exec_block_num: u64 = block_data
-        .as_ref()
-        .and_then(|b| u64::from_str_radix(b.number.trim(), 10).ok())
-        .unwrap_or(chain_exec_block_num);
+    // state_block_num = 父块（读库）；exec_block_num = 当前块（BlockEnv）。
+    // hand_fill：不查链上 tx，exec 用 block_data.number；否则先按 tx 哈希拉交易，block_data 可覆盖块号。
+    let (exec_block_num, tx_chain_data_opt) = if hand_fill {
+        let bd = block_data
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("hand_fill: block_data is required"))?;
+        let n = u64::from_str_radix(bd.number.trim(), 10)
+            .map_err(|_| anyhow::anyhow!("hand_fill: invalid block number in block_data"))?;
+        println!("[env] hand_fill exec_block_num={} (from block_data, no chain tx)", n);
+        (n, None)
+    } else {
+        let tx_chain_data = provider
+            .get_transaction_by_hash(tx.parse()?)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("transaction not found for hash {}", tx))?;
+        let chain_exec_block_num: u64 = tx_chain_data.block_number().unwrap();
+        let exec_block_num: u64 = block_data
+            .as_ref()
+            .and_then(|b| u64::from_str_radix(b.number.trim(), 10).ok())
+            .unwrap_or(chain_exec_block_num);
+        (exec_block_num, Some(tx_chain_data))
+    };
     let state_block_num: u64 = exec_block_num.saturating_sub(1);
 
     let is_multi = tx_data_list
@@ -513,13 +521,16 @@ pub async fn op_trace(
     } else if let Some(ref custom_tx) = tx_data {
         tx_env_from_debug(custom_tx)?
     } else {
+        let tc = tx_chain_data_opt
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing chain tx; tx_data was None"))?;
         TxEnv::builder()
-            .caller(tx_chain_data.from())
-            .kind(tx_chain_data.inner.kind())
-            .value(tx_chain_data.value())
-            .data(tx_chain_data.inner.input().clone())
-            .gas_price(tx_chain_data.effective_gas_price(None))
-            .gas_limit(tx_chain_data.gas_limit())
+            .caller(tc.from())
+            .kind(tc.inner.kind())
+            .value(tc.value())
+            .data(tc.inner.input().clone())
+            .gas_price(tc.effective_gas_price(None))
+            .gas_limit(tc.gas_limit())
             .build()
             .unwrap()
     };
@@ -539,6 +550,8 @@ pub async fn op_trace(
             Some(B256::from_hex(&custom_block.mix_hash).unwrap_or_default());
         evm_block.gas_limit =
             u64::from_str_radix(&custom_block.gas_limit, 10).unwrap_or(60000000);
+    } else if hand_fill {
+        return Err(anyhow::anyhow!("hand_fill: block_data missing for BlockEnv"));
     } else {
         let block = provider
             .get_block_by_number(BlockNumberOrTag::Number(exec_block_num))
@@ -556,7 +569,7 @@ pub async fn op_trace(
     
     // prestateTracer 预填 — 精确模式（块内非首笔交易时保证状态正确）
     // 必须在 provider 被 AlloyDB::new() 消耗前调用
-    let prestate_data = if use_prestate {
+    let prestate_data = if use_prestate && !hand_fill {
         let tx_hash = B256::from_hex(tx)?;
         match fetch_prestate(&provider, tx_hash).await {
             Ok(data) => Some(data),
@@ -566,6 +579,9 @@ pub async fn op_trace(
             }
         }
     } else {
+        if use_prestate && hand_fill {
+            println!("[prestate] skipped (hand_fill, no tx hash)");
+        }
         None
     };
 
@@ -587,6 +603,10 @@ pub async fn op_trace(
     } else {
         let (h, b) = if let Some(ref td) = tx_data {
             resolve_cache_key(td, state_block_num)
+        } else if hand_fill {
+            // 无 tx_data 时的兜底（正常手填单笔会走 tx_data 分支）
+            let synthetic = format!("hand_{}", exec_block_num);
+            (synthetic, state_block_num)
         } else {
             (tx.to_string(), state_block_num)
         };

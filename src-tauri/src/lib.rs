@@ -104,6 +104,8 @@ async fn op_trace(
     enable_shadow: bool,
     readonly: Option<bool>,
     patches: Option<Vec<op_trace::fork::StatePatch>>,
+    // 手填：true 时不按 tx 哈希拉链上交易，块环境来自 block_data
+    hand_fill: Option<bool>,
     session_id: Option<String>,
     #[allow(non_snake_case)] sessionId: Option<String>,
     channel: Channel,
@@ -144,6 +146,7 @@ async fn op_trace(
         enable_shadow,
         readonly.unwrap_or(false),
         patches.unwrap_or_default(),
+        hand_fill.unwrap_or(false),
         channel,
         app_handle,
         session_arc,
