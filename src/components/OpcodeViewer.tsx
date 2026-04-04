@@ -427,11 +427,11 @@ export function OpcodeViewer({ onStackFieldsToggle, onToggleBreakpoint }: Opcode
           </div>
         </CardTitle>
       </CardHeader>
-      <CardContent className="p-0 flex-1 min-h-0">
+      <CardContent className="flex min-h-0 flex-1 flex-col overflow-hidden p-0">
         {opcodes.length > 0 ? (
           <div
             ref={parentRef}
-            className="h-full overflow-auto border-t"
+            className="h-full min-h-0 overflow-auto border-t"
           >
             <div
               style={{
@@ -454,7 +454,8 @@ export function OpcodeViewer({ onStackFieldsToggle, onToggleBreakpoint }: Opcode
                       position: "absolute",
                       top: 0,
                       left: 0,
-                      width: "100%",
+                      right: 10,
+                      width: "auto",
                       height: `${virtualRow.size}px`,
                       transform: `translateY(${virtualRow.start}px)`,
                     }}
