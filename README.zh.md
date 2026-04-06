@@ -2,7 +2,7 @@
 
 OpTrace 是一款高性能、开源的 EVM 调试器，专注于深度以太坊交易重放、状态检查、高级条件扫描以及“假想（What-if）”分支调试。
 
-<video src="https://github.com/user-attachments/assets/67993f1e-5729-4845-ba4a-3e32e0d1c097"
+<video src="https://github.com/user-attachments/assets/6811a723-f13c-48e9-8799-827e64d9bee7"
        width="100%" muted autoplay loop playsinline controls>
 </video>
 
