@@ -155,7 +155,7 @@ export function BottomSheetShell({
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent
         side="bottom"
-        forceMount={contentForceMount}
+        forceMount={contentForceMount ? true : undefined}
         className={cn(bottomSheetContentClassName, fixedMode && heightClassName, !fixedMode && "min-h-0", contentClassName)}
         style={sheetStyle}
         aria-describedby={undefined}
