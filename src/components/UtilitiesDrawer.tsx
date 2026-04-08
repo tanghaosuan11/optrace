@@ -90,7 +90,6 @@ function BaseConvTool() {
             onFocus={() => { if (src?.base !== base) setSrc({ base, raw: val(base) }); }}
             placeholder={ph}
             className="font-mono h-7 text-xs"
-            autoFocus={base === 10}
           />
         </div>
       ))}
@@ -162,7 +161,7 @@ function Keccak256Tool() {
         <Input placeholder={asHex ? "0xdeadbeef..." : "transfer(address,uint256)"} value={input}
           onChange={(e) => { setInput(e.target.value); setResult(""); setError(""); }}
           className="font-mono h-7 text-xs flex-1"
-          onKeyDown={(e) => e.key === "Enter" && compute()} autoFocus />
+          onKeyDown={(e) => e.key === "Enter" && compute()} />
         <label className="flex items-center gap-1 cursor-pointer select-none shrink-0">
           <input type="checkbox" checked={asHex}
             onChange={(e) => { setAsHex(e.target.checked); setResult(""); setError(""); }}
@@ -245,7 +244,7 @@ function ChecksumTool() {
   return (
     <div className="space-y-2">
       <Input placeholder="0xabc...  (any case)" value={input}
-        onChange={(e) => setInput(e.target.value)} className="font-mono h-7 text-xs" autoFocus />
+        onChange={(e) => setInput(e.target.value)} className="font-mono h-7 text-xs" />
       {err && <Err msg={err} />}
       {result && (
         <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5 text-xs font-mono items-start">
@@ -630,7 +629,10 @@ function AbiTool() {
         )}
       </div>
 
-      <div className="flex min-h-0 flex-col gap-1.5 overflow-y-auto pt-2 sm:pt-0 sm:pl-2">
+      <div
+        className="flex min-h-0 flex-col gap-1.5 overflow-y-auto pt-2 sm:pt-0 sm:pl-2"
+        data-keyboard-scroll-root="utilities"
+      >
         <div className="flex items-center justify-between gap-2">
           <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
             {abiOpMode === "encode" ? "Encode calldata" : "Decode calldata"}
@@ -1140,17 +1142,25 @@ export function UtilitiesDrawer() {
         </div>
         {/* Content */}
         {activeTool === "conv" ? (
-          <div className="flex-1 grid grid-cols-3 divide-x overflow-hidden">
-            <div className="overflow-auto px-3 pt-1.5 pb-2"><BaseConvTool /></div>
-            <div className="overflow-auto px-3 pt-1.5 pb-2"><GweiTool /></div>
-            <div className="overflow-auto px-3 pt-1.5 pb-2"><TimestampTool /></div>
+          <div
+            className="flex-1 min-h-0 overflow-y-auto"
+            data-keyboard-scroll-root="utilities"
+          >
+            <div className="grid grid-cols-3 divide-x">
+              <div className="px-3 pt-1.5 pb-2"><BaseConvTool /></div>
+              <div className="px-3 pt-1.5 pb-2"><GweiTool /></div>
+              <div className="px-3 pt-1.5 pb-2"><TimestampTool /></div>
+            </div>
           </div>
         ) : activeTool === "abi" ? (
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-3 pt-1.5 pb-2">
             <AbiTool />
           </div>
         ) : (
-          <div className="flex-1 overflow-auto px-3 pt-1.5 pb-2">
+          <div
+            className="flex-1 overflow-auto px-3 pt-1.5 pb-2"
+            data-keyboard-scroll-root="utilities"
+          >
             {activeTool === "hash4byte" && <KeccakFourByteTool />}
             {activeTool === "checksum"   && <ChecksumTool />}
             {activeTool === "slot"       && <SlotTool />}

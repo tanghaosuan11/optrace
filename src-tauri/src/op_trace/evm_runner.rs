@@ -1,6 +1,7 @@
 //! EVM 执行入口
 //!
-//! 负责 RPC 数据获取、CacheDB 缓存管理、EVM 构建和执行。
+//! 负责 RPC 数据获取、EVM 构建和执行。
+//! 缓存管理、余额差异计算、prestate 获取分别位于同级模块 `cache`、`balance_diff`、`prestate`。
 
 use crate::optrace_journal::OpTraceJournal;
 use alloy_provider::{
@@ -9,301 +10,28 @@ use alloy_provider::{
 };
 use alloy_rpc_types_eth::{BlockNumberOrTag, TransactionTrait};
 use revm::{
-    Context, ExecuteCommitEvm, ExecuteEvm, InspectEvm, context::{
+    Context, InspectEvm, context::{
         BlockEnv, CfgEnv, Evm, LocalContext, TxEnv, result::{ExecResultAndState, ExecutionResult, HaltReason}
-    }, context_interface::JournalTr, database::{AlloyDB, BlockId, Cache, CacheDB}, database_interface::WrapDatabaseAsync, handler::{EthPrecompiles, instructions::EthInstructions}, primitives::{Address, B256, Bytes, Log, TxKind, U256, hardfork::SpecId, hex::FromHex}, state::{AccountInfo, Bytecode, EvmState}
+    }, context_interface::JournalTr, database::{AlloyDB, BlockId, CacheDB}, database_interface::WrapDatabaseAsync, handler::{EthPrecompiles, instructions::EthInstructions}, primitives::{Address, B256, Bytes, TxKind, U256, hex::FromHex}, state::EvmState
 };
-use sha2::{Digest, Sha256};
-use std::{borrow::Cow, u64};
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager};
 use tauri::ipc::Channel;
+use serde::Serialize;
 
 use super::debug_session::{self, DebugSession};
 use super::inspector::Cheatcodes;
 use super::message_encoder::MessageEncoder;
 use super::types::{parse_tx_kind_from_to_field, BlockDebugData, TxDebugData};
-use super::AlloyCacheDB;
 use super::fork::StatePatch;
-use serde::Serialize;
+use super::cache::{resolve_cache_key, get_cache_path, dedup_cache_paths, save_cache, read_cache, merge_cache_into};
+use super::balance_diff::{full_addr, token_changes_from_logs, fmt_signed_delta, AddressBalanceOut, BalanceTokenChangeOut};
+use super::prestate::{fetch_prestate, apply_prestate};
+use super::spec_schedule::{parse_spec_id_name, spec_id_for_chain_block};
 
 
-/// 手填字段拼接后 SHA256，作缓存文件名第一段（链上路径仍用锚点 tx）。
-fn tx_debug_data_content_hash_hex(row: &TxDebugData) -> String {
-    let payload = format!(
-        "{}|{}|{}|{}|{}|{}",
-        row.from.trim(),
-        row.to.trim(),
-        row.value.trim(),
-        row.gas_price.trim(),
-        row.gas_limit.trim(),
-        row.data.trim(),
-    );
-    let mut hasher = Sha256::new();
-    hasher.update(payload.as_bytes());
-    hex::encode(hasher.finalize())
-}
-
-fn resolve_cache_key(row: &TxDebugData, fallback_block: u64) -> (String, u64) {
-    let hash = tx_debug_data_content_hash_hex(row);
-    let block = row
-        .cache_block
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .and_then(|s| u64::from_str_radix(s, 10).ok())
-        .unwrap_or(fallback_block);
-    (hash, block)
-}
-
-fn get_cache_path(
-    app: &AppHandle,
-    name_tx_part: &str,
-    chain_id: u64,
-    block_num: u64,
-    prestate: bool,
-) -> PathBuf {
-    let cache_dir = app
-        .path()
-        .app_data_dir()
-        .unwrap_or_else(|_| std::env::temp_dir().join("optrace"));
-    let dir = cache_dir.join("cache").join("evm_cache").join(chain_id.to_string());
-    std::fs::create_dir_all(&dir).ok();
-    let suffix = if prestate { "_pre" } else { "" };
-    let clean_hash = name_tx_part
-        .trim_start_matches("0x")
-        .trim_start_matches("0X")
-        .to_lowercase();
-    dir.join(format!("{}_{}_{}{}.bin", clean_hash, block_num, "alloydb", suffix))
-}
-
-/// ERC20 Transfer(address,address,uint256) topic
-const TRANSFER_TOPIC: B256 = B256::new([
-    0xdd, 0xf2, 0x52, 0xad, 0x1b, 0xe2, 0xc8, 0x9b, 0x69, 0xc2, 0xb0, 0x68, 0xfc, 0x37, 0x8d, 0xaa,
-    0x95, 0x2b, 0xa7, 0xf1, 0x63, 0xc4, 0xa1, 0x16, 0x28, 0xf5, 0x5a, 0x4d, 0xf5, 0x23, 0xb3, 0xef,
-]);
-
-fn topic_to_addr(topic: &B256) -> Address {
-    Address::from_slice(&topic.as_slice()[12..])
-}
-
-fn full_addr(a: &Address) -> String {
-    format!("{:?}", a)
-}
-
-fn fmt_addr_short(a: &Address) -> String {
-    let s = full_addr(a);
-    if s.len() > 10 { format!("{}...{}", &s[..6], &s[s.len()-4..]) } else { s }
-}
-
-/// 计算按钱包地址汇总的余额净变化，同时打印 + 返回 JSON 字符串
-/// JSON 格式: [{ "address": "0x...", "eth": "+1000" | "-500" | null, "tokens": [{ "contract": "0x...", "delta": "+500" }] }]
-pub(crate) fn compute_and_print_balance_changes(evm_state: &EvmState, logs: &[Log]) -> String {
-    use std::collections::HashMap as HM;
-
-    let eth_key = Address::ZERO;
-    
-    let mut wallet: HM<Address, HM<Address, (U256, U256)>> = HM::new();
-
-    for log in logs {
-        let topics = log.data.topics();
-        if topics.len() < 3 || topics[0] != TRANSFER_TOPIC { continue; }
-        let from   = topic_to_addr(&topics[1]);
-        let to     = topic_to_addr(&topics[2]);
-        let amount = if log.data.data.len() >= 32 {
-            U256::from_be_slice(&log.data.data[..32])
-        } else { U256::ZERO };
-        if amount.is_zero() { continue; }
-        wallet.entry(from).or_default()
-              .entry(log.address).or_insert((U256::ZERO, U256::ZERO)).1 += amount;
-        wallet.entry(to).or_default()
-              .entry(log.address).or_insert((U256::ZERO, U256::ZERO)).0 += amount;
-    }
-
-    for (addr, account) in evm_state.iter() {
-        let orig = account.original_info.balance;
-        let curr = account.info.balance;
-        if orig == curr { continue; }
-        let (gained, lost) = if curr > orig { (curr - orig, U256::ZERO) }
-                             else           { (U256::ZERO, orig - curr) };
-        let e = wallet.entry(*addr).or_default()
-                      .entry(eth_key).or_insert((U256::ZERO, U256::ZERO));
-        e.0 += gained;
-        e.1 += lost;
-    }
-
-    if wallet.is_empty() {
-        // println!("[statediff] (no balance changes)");
-        return "[]".to_string();
-    }
-
-    let mut addrs: Vec<Address> = wallet.keys().cloned().collect();
-    addrs.sort_by_key(|a| full_addr(a));
-
-    let mut json_entries: Vec<String> = Vec::with_capacity(addrs.len());
-
-    for addr in &addrs {
-        let tokens = &wallet[addr];
-        // println!("[statediff] {:?}", addr);
-
-        // ETH
-        let eth_json = if let Some(&(gained, lost)) = tokens.get(&eth_key) {
-            let delta_str = if gained >= lost {
-                format!("+{}", gained - lost)
-            } else {
-                format!("-{}", lost - gained)
-            };
-            // if gained >= lost {
-            //     println!("  ETH  +{}", gained - lost);
-            // } else {
-            //     println!("  ETH  -{}", lost - gained);
-            // }
-            format!("\"{}\"", delta_str)
-        } else {
-            "null".to_string()
-        };
-
-        // ERC20 tokens
-        let mut token_addrs: Vec<Address> = tokens.keys()
-            .filter(|&&t| t != eth_key).cloned().collect();
-        token_addrs.sort_by_key(|a| full_addr(a));
-
-        let mut token_json_parts: Vec<String> = Vec::new();
-        for token in &token_addrs {
-            let (gained, lost) = tokens[token];
-            let net_str = if gained >= lost {
-                if (gained - lost).is_zero() { continue; }
-                let n = gained - lost;
-                // println!("  token {}  +{}", fmt_addr_short(token), n);
-                format!("+{n}")
-            } else {
-                let n = lost - gained;
-                // println!("  token {}  -{}", fmt_addr_short(token), n);
-                format!("-{n}")
-            };
-            token_json_parts.push(format!(
-                "{{\"contract\":\"{}\",\"delta\":\"{}\"}}",
-                full_addr(token), net_str
-            ));
-        }
-
-        json_entries.push(format!(
-            "{{\"address\":\"{}\",\"eth\":{},\"tokens\":[{}]}}",
-            full_addr(addr),
-            eth_json,
-            token_json_parts.join(",")
-        ));
-    }
-
-    format!("[{}]", json_entries.join(","))
-}
-
-fn token_changes_from_logs(logs: &[Log]) -> HashMap<Address, HashMap<Address, (U256, U256)>> {
-    let mut wallet: HashMap<Address, HashMap<Address, (U256, U256)>> = HashMap::new();
-    for log in logs {
-        let topics = log.data.topics();
-        if topics.len() < 3 || topics[0] != TRANSFER_TOPIC { continue; }
-        let from   = topic_to_addr(&topics[1]);
-        let to     = topic_to_addr(&topics[2]);
-        let amount = if log.data.data.len() >= 32 {
-            U256::from_be_slice(&log.data.data[..32])
-        } else { U256::ZERO };
-        if amount.is_zero() { continue; }
-        wallet.entry(from).or_default()
-              .entry(log.address).or_insert((U256::ZERO, U256::ZERO)).1 += amount;
-        wallet.entry(to).or_default()
-              .entry(log.address).or_insert((U256::ZERO, U256::ZERO)).0 += amount;
-    }
-    wallet
-}
-
-#[derive(Serialize)]
-struct BalanceTokenChangeOut {
-    contract: String,
-    delta: String,
-}
-
-#[derive(Serialize)]
-struct AddressBalanceOut {
-    address: String,
-    eth: Option<String>,
-    tokens: Vec<BalanceTokenChangeOut>,
-}
-
-fn fmt_signed_delta(gained: U256, lost: U256) -> Option<String> {
-    if gained == lost { return None; }
-    if gained >= lost {
-        let n = gained - lost;
-        if n.is_zero() { None } else { Some(format!("+{n}")) }
-    } else {
-        let n = lost - gained;
-        if n.is_zero() { None } else { Some(format!("-{n}")) }
-    }
-}
-
-fn save_cache(db: &AlloyCacheDB, path: &Path) {    
-    match bincode::serialize(&db.cache) {
-        Ok(bytes) => {
-            if let Err(e) = std::fs::write(path, bytes) {
-                eprintln!("[cache] ✗ write failed: {e}");
-            } else {
-                println!(
-                    "[cache] ✓ saved to {:?} ({} accounts, {} contracts)",
-                    path,
-                    db.cache.accounts.len(),
-                    db.cache.contracts.len()
-                );
-            }
-        }
-        Err(e) => eprintln!("[cache] ✗ serialize failed: {e}"),
-    }
-}
-
-fn read_cache(path: &Path) -> Option<Cache> {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => {
-            println!("[cache] file found: {:?}", path);
-            b
-        }
-        Err(e) => {
-            println!("[cache] file not found: {:?} ({})", path, e);
-            return None;
-        }
-    };
-    match bincode::deserialize::<Cache>(&bytes) {
-        Ok(loaded) => Some(loaded),
-        Err(e) => {
-            eprintln!("[cache] ✗ deserialize failed from {:?}: {e}", path);
-            None
-        }
-    }
-}
-
-fn merge_cache_into(cache_db: &mut AlloyCacheDB, loaded: Cache, path: &Path) {
-    let acct = loaded.accounts.len();
-    let ctt = loaded.contracts.len();
-    cache_db.cache.accounts.extend(loaded.accounts);
-    cache_db.cache.contracts.extend(loaded.contracts);
-    println!(
-        "[cache] ✓ merged from {:?} ({} accounts, {} contracts)",
-        path, acct, ctt
-    );
-}
-
-fn dedup_cache_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
-    let mut seen = HashSet::new();
-    let mut out = Vec::new();
-    for p in paths {
-        if seen.insert(p.clone()) {
-            out.push(p);
-        }
-    }
-    out
-}
-
-fn tx_env_from_debug(custom: &TxDebugData) -> anyhow::Result<TxEnv> {
+pub fn tx_env_from_debug(custom: &TxDebugData) -> anyhow::Result<TxEnv> {
     let from = Address::from_hex(&custom.from)?;
     let tx_kind = parse_tx_kind_from_to_field(&custom.to)?;
     let value = U256::from_str_radix(&custom.value, 10).unwrap_or_default();
@@ -321,37 +49,6 @@ fn tx_env_from_debug(custom: &TxDebugData) -> anyhow::Result<TxEnv> {
         .unwrap())
 }
 
-fn load_cache(cache_db: &mut AlloyCacheDB, path: &Path) -> bool {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => {
-            println!("[cache] file found: {:?}", path);
-            b
-        }
-        Err(e) => {
-            println!("[cache] file not found: {:?} ({})", path, e);
-            return false;
-        }
-    };
-    match bincode::deserialize::<Cache>(&bytes) {
-        Ok(loaded) => {
-            println!(
-                "[cache] ✓ loaded from {:?} ({} accounts, {} contracts)",
-                path,
-                loaded.accounts.len(),
-                loaded.contracts.len()
-            );
-            cache_db.cache = loaded;
-            println!("[cache] 🎯 CacheDB 已填充，后续 RPC 调用应该会被缓存覆盖");
-            true
-        }
-        Err(e) => {
-            eprintln!("[cache] ✗ deserialize failed (stale?): {e}");
-            println!("[cache] 🔄 缓存文件损坏，将从 RPC 重新获取并覆盖");
-            false
-        }
-    }
-}
-
 
 #[derive(Clone, Debug)]
 struct Env {
@@ -364,72 +61,11 @@ impl Env {
     fn mainnet() -> Self {
         let mut cfg = CfgEnv::default();
         cfg.disable_nonce_check = true;
-        // EIP-7825 (Osaka): default tx gas cap is 16_777_216; chain txs can exceed it. Replay must accept real limits.
         cfg.tx_gas_limit_cap = Some(u64::MAX);
         Self {
             block: BlockEnv::default(),
             tx: TxEnv::default(),
             cfg,
-        }
-    }
-}
-
-
-/// debug_traceTransaction 返回的 prestateTracer 单个账户
-#[derive(serde::Deserialize, Debug)]
-struct PrestateAccount {
-    #[serde(default)]
-    balance: Option<U256>,
-    #[serde(default)]
-    nonce: Option<u64>,
-    #[serde(default)]
-    code: Option<Bytes>,
-    #[serde(default)]
-    storage: Option<HashMap<B256, U256>>,
-}
-
-/// 通过 debug_traceTransaction + prestateTracer 获取交易执行前的所有相关状态
-async fn fetch_prestate(
-    provider: &alloy_provider::DynProvider,
-    tx_hash: B256,
-) -> anyhow::Result<HashMap<Address, PrestateAccount>> {
-    let params = serde_json::json!([
-        tx_hash,
-        { "tracer": "prestateTracer" }
-    ]);
-    let result: HashMap<Address, PrestateAccount> = provider
-        .raw_request(Cow::Borrowed("debug_traceTransaction"), params)
-        .await
-        .map_err(|e| anyhow::anyhow!("prestateTracer RPC failed: {e}"))?;
-    println!(
-        "[prestate] fetched {} accounts from prestateTracer",
-        result.len()
-    );
-    Ok(result)
-}
-
-/// 将 prestateTracer 返回的数据预填到 CacheDB
-fn apply_prestate(cache_db: &mut AlloyCacheDB, prestate: HashMap<Address, PrestateAccount>) {
-    for (address, acct) in prestate {
-        let code_bytes = acct.code.unwrap_or_default();
-        let code_hash = revm::primitives::keccak256(&code_bytes);
-        let info = AccountInfo {
-            balance: acct.balance.unwrap_or_default(),
-            nonce: acct.nonce.unwrap_or(0),
-            code_hash,
-            account_id: None,
-            code: Some(Bytecode::new_raw(code_bytes)),
-        };
-        cache_db.insert_account_info(address, info);
-
-        if let Some(storage) = acct.storage {
-            for (slot, value) in storage {
-                let _ = cache_db.insert_account_storage(
-                    address,
-                    slot.into(),
-                    value,
-                );
-            }
         }
     }
 }
@@ -447,6 +83,7 @@ pub async fn op_trace(
     readonly: bool,
     patches: Vec<StatePatch>,
     hand_fill: bool,
+    hardfork: Option<String>,
     channel: Channel,
     app_handle: AppHandle,
     session_state: Arc<Mutex<std::collections::HashMap<String, super::debug_session::SessionEntry>>>,
@@ -487,7 +124,6 @@ pub async fn op_trace(
     let chain_id = provider.get_chain_id().await.unwrap_or(1);
 
     // state_block_num = 父块（读库）；exec_block_num = 当前块（BlockEnv）。
-    // hand_fill：不查链上 tx，exec 用 block_data.number；否则先按 tx 哈希拉交易，block_data 可覆盖块号。
     let (exec_block_num, tx_chain_data_opt) = if hand_fill {
         let bd = block_data
             .as_ref()
@@ -567,8 +203,7 @@ pub async fn op_trace(
     }
     evm_block.gas_limit = u64::MAX; // 调试时不受块 gas limit 限制
     
-    // prestateTracer 预填 — 精确模式（块内非首笔交易时保证状态正确）
-    // 必须在 provider 被 AlloyDB::new() 消耗前调用
+    // prestateTracer 预填 — 精确模式
     let prestate_data = if use_prestate && !hand_fill {
         let tx_hash = B256::from_hex(tx)?;
         match fetch_prestate(&provider, tx_hash).await {
@@ -589,9 +224,7 @@ pub async fn op_trace(
         WrapDatabaseAsync::new(AlloyDB::new(provider, BlockId::number(state_block_num))).unwrap();
     let mut cache_db = CacheDB::new(alloy_db);
 
-    // 读取缓存路径：
-    // - 多笔：收集所有 tx 对应的缓存路径，去重后全部加载并合并到一个 CacheDB；
-    // - 单笔：仅加载该笔路径（或锚点 tx 的默认路径）。
+    // 读取缓存路径
     let cache_paths: Vec<PathBuf> = if is_multi {
         let list = tx_data_list.as_ref().unwrap();
         let mut paths = Vec::with_capacity(list.len());
@@ -604,7 +237,6 @@ pub async fn op_trace(
         let (h, b) = if let Some(ref td) = tx_data {
             resolve_cache_key(td, state_block_num)
         } else if hand_fill {
-            // 无 tx_data 时的兜底（正常手填单笔会走 tx_data 分支）
             let synthetic = format!("hand_{}", exec_block_num);
             (synthetic, state_block_num)
         } else {
@@ -629,7 +261,7 @@ pub async fn op_trace(
         println!("[cache] ❌ 用户禁用了 AlloyDB 缓存");
     }
 
-    // 再用 prestate 覆盖（精确值优先级最高，必须在 cache 之后写入）
+    // 再用 prestate 覆盖（精确值优先级最高）
     if let Some(prestate) = prestate_data {
         let prestate_acct_count = prestate.len();
         apply_prestate(&mut cache_db, prestate);
@@ -639,8 +271,34 @@ pub async fn op_trace(
 
     let env = Env::mainnet();
 
-    let mut backend: OpTraceJournal<CacheDB<WrapDatabaseAsync<AlloyDB<alloy_provider::network::Ethereum, alloy_provider::DynProvider>>>> = OpTraceJournal::new(SpecId::default(), cache_db);
-    backend.set_spec_id(SpecId::OSAKA);
+    let spec_id = match hardfork
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("auto"))
+    {
+        Some(name) => match parse_spec_id_name(name) {
+            Some(spec) => {
+                println!("[env] hardfork override='{}' -> {:?}", name, spec);
+                spec
+            }
+            None => {
+                eprintln!(
+                    "[env][warn] unknown hardfork override='{}', fallback to auto schedule",
+                    name
+                );
+                spec_id_for_chain_block(chain_id, exec_block_num)
+            }
+        },
+        None => spec_id_for_chain_block(chain_id, exec_block_num),
+    };
+    println!(
+        "[env] spec_id={:?} (chain_id={}, block={})",
+        spec_id, chain_id, exec_block_num
+    );
+
+    let mut backend: OpTraceJournal<CacheDB<WrapDatabaseAsync<AlloyDB<alloy_provider::network::Ethereum, alloy_provider::DynProvider>>>> =
+        OpTraceJournal::new(spec_id, cache_db);
+    backend.set_spec_id(spec_id);
 
     let to_log = match initial_tx.kind {
         TxKind::Create => "<Create>".to_string(),
@@ -672,17 +330,14 @@ pub async fn op_trace(
         error: Ok(()),
     };
 
-    // send_finished 必须推迟到 session 存入全局状态之后（前端收到 Finished 后立即 seek_to）
-    // inspector._set_verify_memory(true); // 开启内存验证
     let mut evm = Evm::new_with_inspector(
         context,
         &mut inspector,
-        EthInstructions::new_mainnet_with_spec(SpecId::default()),
-        EthPrecompiles::new(SpecId::default()),
+        EthInstructions::new_mainnet_with_spec(spec_id),
+        EthPrecompiles::new(spec_id),
     );
     println!("start inspect tx");
     let inspect_t0 = std::time::Instant::now();
-    // 多笔时：第 2 笔起每笔在 trace 中的起始 global 下标（Finished 里 txBoundaries）
     let mut tx_boundary_starts: Vec<u32> = Vec::new();
     let results: anyhow::Result<Vec<ExecResultAndState<ExecutionResult<HaltReason>, EvmState>>> =
         if is_multi {
@@ -718,8 +373,7 @@ pub async fn op_trace(
         },
         inspect_ms
     );
-    // 允许读缓存，但 readonly 模式禁止落盘写缓存。
-    // 统一保存策略：将当前 CacheDB 覆盖写回所有参与的缓存路径（多笔/单笔一致）。
+    // 统一保存策略
     if use_alloy_cache && !readonly {
         for p in &cache_paths {
             save_cache(evm.ctx.journaled_state.db(), p);
@@ -727,7 +381,6 @@ pub async fn op_trace(
         }
     }
     let balance_json = if let Ok(ref rs) = results {
-        // 2A: ETH 变化从 Journal(transfer/balance_incr) 采集；Token 变化从每笔 logs(Transfer) 采集。
         let mut eth_by_tx = evm.ctx.journaled_state.take_eth_deltas_by_tx();
         #[derive(Serialize)]
         struct GroupOut {
@@ -790,7 +443,7 @@ pub async fn op_trace(
     let send_finished_fn: Box<dyn FnOnce()> =
         Box::new(move || inspector.send_finished(tx_finish_boundaries.as_deref()));
 
-    // 将 DebugSession 存入全局状态，供 seek_to 使用（必须在 send_finished 之前，否则前端收到 Finished 后立即 seek_to 会找不到 session）
+    // 将 DebugSession 存入全局状态
     {
         let mut finished_session = match Arc::try_unwrap(session) {
             Ok(mutex) => mutex.into_inner().unwrap(),

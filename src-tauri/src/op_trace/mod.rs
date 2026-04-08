@@ -5,21 +5,25 @@ use revm::{
 };
 use serde::Serialize;
 
-mod evm_runner;
+pub mod evm_runner;
 mod inspector;
 mod message_encoder;
 mod scan;
 pub mod debug_session;
-mod types;
+pub mod types;
 mod frame_manager;
 mod tracer;
 pub mod shadow;
 pub mod fork;
 pub mod cfg_builder;
 pub mod symbolic;
+pub mod cache;
+pub mod balance_diff;
+mod prestate;
+mod spec_schedule;
 
 pub use debug_session::DebugSessionState;
-pub use evm_runner::op_trace;
+pub use evm_runner::{op_trace, tx_env_from_debug};
 pub use scan::{ConditionGroup, scan_conditions_impl};
 pub use types::{BlockDebugData, TxDebugData};
 

@@ -18,6 +18,8 @@ export interface SymConfig {
   origin_sym?: boolean;
   timestamp_sym?: boolean;
   block_number_sym?: boolean;
+  /** 初始存储状态中被视为符号的 slot，每项 [slot_hex64, varName] */
+  storage_symbols?: [string, string][];
 }
 
 /** 对目标 JUMPI 步骤的期望 */
@@ -42,6 +44,59 @@ export type SolverResult =
   | { status: "Unsat"; target_transaction_id: number }
   | { status: "Unknown"; reason: string; target_transaction_id: number }
   | { status: "Error"; message: string; target_transaction_id?: number };
+
+/** 分层回退的一次尝试记录 */
+export interface FallbackAttempt {
+  tier: string;
+  source_count: number;
+  result_status: string;
+}
+
+/** symbolic_auto_solve 返回类型 */
+export interface AutoSolveResult {
+  result: SolverResult;
+  explain?: SolveExplain | null;
+  sources: SymSource[];
+  auto_config: SymConfig;
+  attempts?: FallbackAttempt[];
+}
+
+/** 符号源（对应 Rust SymSource enum），serde tag = "kind" */
+export type SymSource =
+  | { kind: "Calldata"; data: { tx_id: number; offset: number } }
+  | { kind: "Callvalue"; data: { tx_id: number } }
+  | { kind: "Caller"; data: { tx_id: number } }
+  | { kind: "Origin"; data: { tx_id: number } }
+  | { kind: "Timestamp" }
+  | { kind: "BlockNumber" }
+  | { kind: "StorageInitial"; data: { tx_id: number; slot: string } };
+
+/** Unsat 原因分类（对应 Rust UnsatReason, serde tag = "code"） */
+export type UnsatReason =
+  | { code: "PathContradiction"; conflict_step?: number | null }
+  | { code: "ConcreteCondition" }
+  | { code: "NoUsefulSources" };
+
+/** Unknown 原因分类（对应 Rust UnknownReason, serde tag = "code"） */
+export type UnknownReason =
+  | { code: "UninterpretedFunctions"; uf_count: number }
+  | { code: "Timeout" }
+  | { code: "Other"; detail: string };
+
+/** 解释分类（对应 Rust ExplainCategory, serde tag = "kind"） */
+export type ExplainCategory =
+  | { kind: "UnsatPath" } & UnsatReason
+  | { kind: "UnknownSolver" } & UnknownReason
+  | { kind: "Error" };
+
+/** 求解失败诊断（对应 Rust SolveExplain） */
+export interface SolveExplain {
+  category: ExplainCategory;
+  message: string;
+  suggestions: string[];
+  symbolic_constraint_count: number;
+  uf_constraint_count: number;
+}
 
 export interface SymbolicSolveParams {
   /** 根交易原始 calldata，十六进制（带或不带 0x） */

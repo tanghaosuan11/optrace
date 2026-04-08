@@ -15,7 +15,7 @@ pub struct StatePatch {
     pub balance_patches: Vec<(String, String)>,
 }
 
-pub(crate) fn parse_address_hex(s: &str) -> Result<Address, String> {
+pub fn parse_address_hex(s: &str) -> Result<Address, String> {
     let s = s.trim();
     if s.is_empty() {
         return Err("Address is required".into());
@@ -23,7 +23,7 @@ pub(crate) fn parse_address_hex(s: &str) -> Result<Address, String> {
     Address::from_hex(s).map_err(|e| format!("Invalid address: {e}"))
 }
 
-pub(crate) fn parse_u256_hex(s: &str) -> Result<U256, String> {
+pub fn parse_u256_hex(s: &str) -> Result<U256, String> {
     let t = s.trim();
     if t.starts_with('-') {
         return Err("Value cannot be negative".into());
@@ -35,7 +35,7 @@ pub(crate) fn parse_u256_hex(s: &str) -> Result<U256, String> {
     U256::from_str_radix(t, 16).map_err(|_| "Invalid hex (U256)".to_string())
 }
 
-fn hex_payload_byte_len(hex: &str) -> Result<usize, String> {
+pub fn hex_payload_byte_len(hex: &str) -> Result<usize, String> {
     let t = hex.trim();
     let t = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")).unwrap_or(t);
     if t.is_empty() {
@@ -50,7 +50,7 @@ fn hex_payload_byte_len(hex: &str) -> Result<usize, String> {
     Ok(t.len() / 2)
 }
 
-fn parse_pc_u32(s: &str) -> Result<u32, String> {
+pub fn parse_pc_u32(s: &str) -> Result<u32, String> {
     let s = s.trim();
     if s.is_empty() {
         return Err("PC is required".into());
@@ -63,7 +63,7 @@ fn parse_pc_u32(s: &str) -> Result<u32, String> {
     }
 }
 
-fn validate_value_wei_hex(s: &str) -> Result<(), String> {
+pub fn validate_value_wei_hex(s: &str) -> Result<(), String> {
     let t = s.trim();
     if t.starts_with('-') {
         return Err("Value cannot be negative".into());

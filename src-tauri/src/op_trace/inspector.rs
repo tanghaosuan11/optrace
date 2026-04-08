@@ -32,7 +32,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use super::debug_session::{DebugSession, FrameRecord, FrameTerminalState, StorageChangeRecord, TraceStep};
+use super::debug_session::{DebugSession, FrameRecord, FrameTerminalState, KeccakRecord, StateChangeKind, StateChangeRecord, StorageChangeRecord, TraceStep};
 use super::fork::StatePatch;
 use super::message_encoder::MessageEncoder;
 use super::shadow::ShadowState;
@@ -47,6 +47,8 @@ struct StepInfo {
     step_count: usize,
     /// 执行前内存大小，用于检测 MLOAD 等导致的静默内存扩张
     memory_len_before: usize,
+    /// KECCAK256 执行前捕获的输入字节（step() 中捕获，step_end() 中发送）
+    keccak_input: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Default)]
@@ -85,6 +87,8 @@ pub(crate) struct Cheatcodes<BlockT, TxT, CfgT> {
     encoder: MessageEncoder,
     // 已处理过的 journal 条目总数，用于在 step_end 中只处理新增条目（去重）
     last_journal_total_entries: usize,
+    // 账户/余额/nonce 变化的 journal 游标（独立于 storage 游标）
+    last_journal_state_entries: usize,
     // seek_to 用的持久存储
     debug_session: Arc<Mutex<DebugSession>>,
     /// 开关：开启后每步对比增量重建内存与实际全量内存
@@ -122,6 +126,7 @@ impl<BlockT, TxT, CfgT> Cheatcodes<BlockT, TxT, CfgT> {
             bytecode: Bytecode::default(),
             encoder,
             last_journal_total_entries: 0,
+            last_journal_state_entries: 0,
             debug_session: debug_session.clone(),
             verify_memory: false,
             phantom: core::marker::PhantomData,
@@ -404,6 +409,95 @@ where
         }
     }
 
+    /// 扫描 journal 新增条目中的账户/余额/nonce 变化，发出 StateChange 消息。
+    /// 使用独立游标 `last_journal_state_entries` 避免重复处理。
+    fn process_journal_state(
+        &mut self,
+        context: &mut Context<BlockT, TxT, CfgT, AlloyCacheDB, OpTraceJournal<AlloyCacheDB>>,
+    ) {
+        let step_idx = self.step_info.step_count;
+        let frame_id = self.frame_manager.current_id();
+        let tid = self.transaction_id;
+        let journal_ref = context.journal().with_journaled_state();
+        let mut flat_idx = 0usize;
+        let mut new_state: Vec<StateChangeRecord> = Vec::new();
+
+        for entry in journal_ref.journal.iter() {
+            if flat_idx >= self.last_journal_state_entries {
+                let kind = match entry {
+                    JournalEntry::AccountCreated { address, is_created_globally } => Some(
+                        StateChangeKind::AccountCreated {
+                            address: Address::from_slice(address.as_slice()),
+                            is_created_globally: *is_created_globally,
+                        },
+                    ),
+                    JournalEntry::AccountDestroyed { address, target, had_balance, .. } => Some(
+                        StateChangeKind::AccountDestroyed {
+                            address: Address::from_slice(address.as_slice()),
+                            target:  Address::from_slice(target.as_slice()),
+                            had_balance: *had_balance,
+                        },
+                    ),
+                    JournalEntry::BalanceChange { address, old_balance } => {
+                        let new_balance = journal_ref.state
+                            .get(address)
+                            .map(|a| a.info.balance)
+                            .unwrap_or(*old_balance);
+                        Some(StateChangeKind::BalanceChange {
+                            address: Address::from_slice(address.as_slice()),
+                            old_balance: *old_balance,
+                            new_balance,
+                        })
+                    },
+                    JournalEntry::BalanceTransfer { from, to, balance } => Some(
+                        StateChangeKind::BalanceTransfer {
+                            from:    Address::from_slice(from.as_slice()),
+                            to:      Address::from_slice(to.as_slice()),
+                            balance: *balance,
+                        },
+                    ),
+                    JournalEntry::NonceChange { address, previous_nonce } => {
+                        let new_nonce = journal_ref.state
+                            .get(address)
+                            .map(|a| a.info.nonce)
+                            .unwrap_or(*previous_nonce + 1);
+                        Some(StateChangeKind::NonceChange {
+                            address: Address::from_slice(address.as_slice()),
+                            previous_nonce: *previous_nonce,
+                            new_nonce,
+                        })
+                    },
+                    JournalEntry::NonceBump { address } => {
+                        let cur_nonce = journal_ref.state
+                            .get(address)
+                            .map(|a| a.info.nonce)
+                            .unwrap_or(0);
+                        Some(StateChangeKind::NonceBump {
+                            address: Address::from_slice(address.as_slice()),
+                            previous_nonce: cur_nonce.saturating_sub(1),
+                            new_nonce: cur_nonce,
+                        })
+                    },
+                    _ => None,
+                };
+                if let Some(kind) = kind {
+                    let rec = StateChangeRecord { step_index: step_idx, transaction_id: tid, frame_id, kind };
+                    self.encoder.send_state_change(&rec);
+                    new_state.push(rec);
+                }
+            }
+            flat_idx += 1;
+        }
+        self.last_journal_state_entries = flat_idx;
+
+        if !new_state.is_empty() {
+            let mut session = self.debug_session.lock().unwrap();
+            for rec in new_state {
+                session.push_state_change(rec);
+            }
+        }
+    }
+
     fn process_sstore_load(
         &mut self,
         _context: &mut Context<BlockT, TxT, CfgT, AlloyCacheDB, OpTraceJournal<AlloyCacheDB>>,
@@ -509,6 +603,34 @@ where
         self.storage_tracer
             .record_storage_key(op, interp.stack.data());
 
+        // KECCAK256 (0x20): 执行前从内存读输入字节，step_end() 中发送结果
+        if opcode == 0x20 {
+            let stack = interp.stack.data();
+            let len = stack.len();
+            if len >= 2 {
+                let offset = stack[len - 1];
+                let size = stack[len - 2];
+                if let (Ok(off), Ok(sz)) = (usize::try_from(offset), usize::try_from(size)) {
+                    let mem_size = interp.memory.len();
+                    if off + sz <= mem_size {
+                        self.step_info.keccak_input = Some(interp.memory.slice(off..off + sz).to_vec());
+                    } else {
+                        // 超出范围时按 EVM 规范填零
+                        let mut buf = vec![0u8; sz];
+                        let copy_len = mem_size.saturating_sub(off);
+                        buf[..copy_len].copy_from_slice(&interp.memory.slice(off..off + copy_len));
+                        self.step_info.keccak_input = Some(buf);
+                    }
+                } else {
+                    self.step_info.keccak_input = None;
+                }
+            } else {
+                self.step_info.keccak_input = None;
+            }
+        } else {
+            self.step_info.keccak_input = None;
+        }
+
         let frame_step_count = self.frame_manager.current_step_count();
         self.encoder.pack_step(
             self.transaction_id,
@@ -592,8 +714,35 @@ where
         self.encoder.backfill_gas_cost(self.gas_tracer.get_gas_cost());
 
         self.process_journal_storage(context);
-        // 只在 SLOAD/TLOAD 时才需要读栈顶，避免每步都做 Vec 堆分配
+        self.process_journal_state(context);
+        // KECCAK256: step_end 时栈顶是 hash 结果，结合 step 中捕获的 input 一起发送
         let op = self.step_info.opcode.as_usize();
+        if op == 0x20 {
+            if let Some(input) = self.step_info.keccak_input.take() {
+                let stack = interp.stack.data();
+                if let Some(hash_u256) = stack.last() {
+                    let hash_bytes = hash_u256.to_be_bytes::<32>();
+                    {
+                        let mut session = self.debug_session.lock().unwrap();
+                        session.push_keccak_op(KeccakRecord {
+                            step_index: self.step_info.step_count.saturating_sub(1),
+                            transaction_id: self.transaction_id,
+                            frame_id: self.frame_manager.current_id(),
+                            input: input.clone(),
+                            hash: hash_bytes,
+                        });
+                    }
+                    self.encoder.send_keccak_op(
+                        self.transaction_id,
+                        self.frame_manager.current_id(),
+                        self.step_info.step_count.saturating_sub(1),
+                        &hash_bytes,
+                        &input,
+                    );
+                }
+            }
+        }
+        // 只在 SLOAD/TLOAD 时才需要读栈顶，避免每步都做 Vec 堆分配
         if op == 0x54 || op == 0x5c {
             self.process_sstore_load(context, interp.stack.data());
         }
@@ -722,6 +871,7 @@ where
                 gas_used: 0,
                 step_count: 0,
                 success: false,
+                reverted_by_parent: false,
             });
         self.send_frame_enter();
         // shadow: 推入新帧
@@ -756,6 +906,9 @@ where
             success,
             frame_step_count,
         );
+        if !success {
+            self.debug_session.lock().unwrap().mark_children_reverted_by_parent(self.transaction_id, frame_id);
+        }
         self.write_terminal_state_on_frame_end(frame_id, frame_step_count);
 
         // Precompile 调用不会执行 RETURN/REVERT opcode，需要在此补一个父 frame 内存 patch
@@ -851,6 +1004,7 @@ where
                 gas_used: 0,
                 step_count: 0,
                 success: false,
+                reverted_by_parent: false,
             });
         self.send_frame_enter();
         // shadow: 推入新帧（CREATE 的 calldata 来自 init_code）
@@ -887,6 +1041,9 @@ where
             success,
             frame_step_count,
         );
+        if !success {
+            self.debug_session.lock().unwrap().mark_children_reverted_by_parent(self.transaction_id, frame_id);
+        }
         self.write_terminal_state_on_frame_end(frame_id, frame_step_count);
 
         let deployed_addr = _outcome.address.unwrap_or(Address::ZERO);

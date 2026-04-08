@@ -19,6 +19,7 @@ use tauri::ipc::Channel;
 
 use super::super::debug_session::DebugSession;
 use super::super::message_encoder::MessageEncoder;
+use super::super::spec_schedule::spec_id_for_chain_block;
 use super::super::types::{BlockDebugData, TxDebugData};
 use super::fork_inspector::ForkInspector;
 
@@ -182,8 +183,17 @@ pub async fn fork_execute(
     let mut cfg = CfgEnv::default();
     cfg.disable_nonce_check = true;
 
-    let mut backend = OpTraceJournal::new(SpecId::default(), cache_db);
-    backend.set_spec_id(SpecId::OSAKA);
+    // tx_data_block is the parent block for state reads (exec_block_num - 1),
+    // but EVM rules must match the execution block of the transaction.
+    let exec_block_num = tx_data_block.saturating_add(1);
+    let spec_id = spec_id_for_chain_block(chain_id, exec_block_num);
+    println!(
+        "[fork] spec_id={:?} (chain_id={}, block={})",
+        spec_id, chain_id, exec_block_num
+    );
+
+    let mut backend = OpTraceJournal::new(spec_id, cache_db);
+    backend.set_spec_id(spec_id);
 
     let tx = TxEnv::builder()
         .caller(from_address)
@@ -210,8 +220,8 @@ pub async fn fork_execute(
     let mut evm = Evm::new_with_inspector(
         context,
         &mut inspector,
-        EthInstructions::new_mainnet_with_spec(SpecId::default()),
-        EthPrecompiles::new(SpecId::default()),
+        EthInstructions::new_mainnet_with_spec(spec_id),
+        EthPrecompiles::new(spec_id),
     );
 
     println!("[fork] start inspect tx with {} patches", patch_count);
@@ -224,7 +234,7 @@ pub async fn fork_execute(
 
     // 计算并发送余额/token 变化（与 evm_runner fork 路径对齐）
     if let Ok(ref r) = result {
-        let json = crate::op_trace::evm_runner::compute_and_print_balance_changes(
+        let json = crate::op_trace::balance_diff::compute_and_print_balance_changes(
             &r.state,
             r.result.logs(),
         );

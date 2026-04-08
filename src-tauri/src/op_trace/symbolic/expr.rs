@@ -10,7 +10,7 @@ use std::collections::HashSet;
 
 /// 32 字节大端序 → 64 字符小写十六进制（无 0x 前缀）
 #[inline]
-pub(crate) fn bytes32_to_hex64(b: &[u8; 32]) -> String {
+pub fn bytes32_to_hex64(b: &[u8; 32]) -> String {
     b.iter().map(|x| format!("{:02x}", x)).collect()
 }
 
@@ -149,9 +149,48 @@ impl Expr {
             Expr::Srem(a,b) => fmt2("bvsrem", a, b),
             Expr::Addmod(a,b,c) => format!("(bvurem (bvadd {} {}) {})", a.to_smt2(), b.to_smt2(), c.to_smt2()),
             Expr::Mulmod(a,b,c) => format!("(bvurem (bvmul {} {}) {})", a.to_smt2(), b.to_smt2(), c.to_smt2()),
-            // EXP / SIGNEXTEND: Z3 无内建 BV pow，用 UF（不透明函数）建模
-            Expr::Exp(a,b)     => format!("(evm_exp {} {})",     a.to_smt2(), b.to_smt2()),
-            Expr::Signext(b,x) => format!("(evm_signext {} {})", b.to_smt2(), x.to_smt2()),
+            // EXP(base, exp): 小常量指数展开为乘法链，大/动态指数用 UF
+            Expr::Exp(base, exp) => {
+                if let Expr::Const(h) = exp.as_ref() {
+                    // 解析指数值（最多取低 8 字节足够判断大小）
+                    let exp_val = u64::from_str_radix(
+                        &h[h.len().saturating_sub(16)..], 16
+                    ).unwrap_or(u64::MAX);
+                    match exp_val {
+                        0 => format!("#x{}", { let mut s = "0".repeat(63); s.push('1'); s }),
+                        1 => base.to_smt2(),
+                        n @ 2..=8 => {
+                            let b = base.to_smt2();
+                            let mut acc = b.clone();
+                            for _ in 1..n {
+                                acc = format!("(bvmul {} {})", acc, b);
+                            }
+                            acc
+                        }
+                        _ => format!("(evm_exp {} {})", base.to_smt2(), exp.to_smt2()),
+                    }
+                } else {
+                    format!("(evm_exp {} {})", base.to_smt2(), exp.to_smt2())
+                }
+            }
+            // SIGNEXTEND(b, x): 当 b 为已知常量时用精确的 BV extract + sign_extend
+            Expr::Signext(b, x) => {
+                if let Expr::Const(h) = b.as_ref() {
+                    let b_val = u64::from_str_radix(&h[h.len().saturating_sub(2)..], 16)
+                        .unwrap_or(31) as usize;
+                    if b_val >= 31 {
+                        x.to_smt2() // 无需扩展
+                    } else {
+                        let bit_width = (b_val + 1) * 8;
+                        let high_bit = bit_width - 1;
+                        let ext_bits = 256 - bit_width;
+                        format!("((_ sign_extend {}) ((_ extract {} 0) {}))",
+                                ext_bits, high_bit, x.to_smt2())
+                    }
+                } else {
+                    format!("(evm_signext {} {})", b.to_smt2(), x.to_smt2())
+                }
+            }
 
             // 位运算
             Expr::And(a,b) => fmt2("bvand",  a, b),
@@ -162,7 +201,27 @@ impl Expr {
             Expr::Shl(sh, v) => format!("(bvshl {} {})",  v.to_smt2(), sh.to_smt2()),
             Expr::Shr(sh, v) => format!("(bvlshr {} {})", v.to_smt2(), sh.to_smt2()),
             Expr::Sar(sh, v) => format!("(bvashr {} {})", v.to_smt2(), sh.to_smt2()),
-            Expr::Byteop(i,x) => format!("(evm_byte {} {})", i.to_smt2(), x.to_smt2()),
+            Expr::Byteop(i, x) => {
+                // BYTE(i, x): extract byte i (MSB=0) from x, zero-extend to 256 bits
+                // 当 i 为常量时用精确 BV extract
+                if let Expr::Const(h) = i.as_ref() {
+                    let i_val = u64::from_str_radix(
+                        &h[h.len().saturating_sub(2)..], 16
+                    ).unwrap_or(32);
+                    if i_val >= 32 {
+                        // 超出范围 → 0
+                        format!("#x{}", "0".repeat(64))
+                    } else {
+                        // byte i (MSB=0) 在 BV256 中对应的小端位: bit[(31-i)*8+7 : (31-i)*8]
+                        let low_bit = (31 - i_val as usize) * 8;
+                        let high_bit = low_bit + 7;
+                        format!("((_ zero_extend 248) ((_ extract {} {}) {}))",
+                                high_bit, low_bit, x.to_smt2())
+                    }
+                } else {
+                    format!("(evm_byte {} {})", i.to_smt2(), x.to_smt2())
+                }
+            }
 
             // 比较：EVM 返回 0/1 (BV256)，SMT 返回 Bool → 用 ite 包装
             Expr::Lt(a,b)  => ite("bvult", a, b),

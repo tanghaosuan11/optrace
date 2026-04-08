@@ -67,7 +67,10 @@ export function BookmarksDrawer({
           </div>
         </div>
         {/* List */}
-        <div className="flex-1 overflow-auto px-2 py-1">
+        <div
+          className="flex-1 overflow-auto px-2 py-1"
+          data-keyboard-scroll-root="bookmarks"
+        >
           {totalCount === 0 ? (
             <div className="h-full flex items-center justify-center text-center text-muted-foreground text-xs px-4">
               No breakpoints — click an opcode row to add one

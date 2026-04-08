@@ -16,6 +16,22 @@ function getWindowMaxPx(maxHeightVh: number) {
   return Math.floor(window.innerHeight * maxHeightVh);
 }
 
+/** Esc：若焦点在可编辑控件上则先失焦（便于 Vimium 等），再次 Esc 才关闭抽屉 */
+function handleBottomSheetEscapeKeyDown(e: KeyboardEvent) {
+  if (e.key !== "Escape") return;
+  const el = document.activeElement;
+  if (!el || !(el instanceof HTMLElement)) return;
+  const editable =
+    el.tagName === "INPUT" ||
+    el.tagName === "TEXTAREA" ||
+    el.tagName === "SELECT" ||
+    el.isContentEditable;
+  if (editable) {
+    e.preventDefault();
+    el.blur();
+  }
+}
+
 function getInitialHeightPx(opts: {
   defaultHeightPx?: number;
   defaultHeightVh: number;
@@ -159,6 +175,7 @@ export function BottomSheetShell({
         className={cn(bottomSheetContentClassName, fixedMode && heightClassName, !fixedMode && "min-h-0", contentClassName)}
         style={sheetStyle}
         aria-describedby={undefined}
+        onEscapeKeyDown={handleBottomSheetEscapeKeyDown}
       >
         {!fixedMode && (
           <div

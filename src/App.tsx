@@ -34,6 +34,10 @@ import { useStepPlayback } from "./hooks/useStepPlayback";
 import { useTabSync } from "./hooks/useTabSync";
 import { useFourbyteResolver } from "./hooks/useFourbyteResolver";
 import { useActiveFrameProjection } from "./hooks/useActiveFrameProjection";
+import { HintOverlay } from "@/components/HintOverlay";
+import { PanelHintOverlay } from "@/components/PanelHintOverlay";
+import { KeyboardShortcutsHelpDialog } from "@/components/KeyboardShortcutsHelpDialog";
+import { CommandPaletteDialog } from "@/components/CommandPaletteDialog";
 import { useDebugCommandBindings } from "./hooks/useDebugCommandBindings";
 import { useDebugRuntimeRefs } from "./hooks/useDebugRuntimeRefs";
 import { getWindowMode } from "./lib/windowMode";
@@ -97,6 +101,12 @@ function App() {
     breakpointPcsRef,
     conditionHitSetRef,
   } = useDebugRuntimeRefs();
+
+  // Panel scroll container refs for keyboard scrolling
+  const opcodeScrollRef = useRef<HTMLDivElement>(null);
+  const stackScrollRef = useRef<HTMLDivElement>(null);
+  const memoryScrollRef = useRef<HTMLDivElement>(null);
+  const storageScrollRef = useRef<HTMLDivElement>(null);
 
   // 从 Tauri Store 加载各模块缓存 + 迁移 localStorage
   useEffect(() => {
@@ -600,6 +610,15 @@ function App() {
     seekTo,
     navBack,
     navForward,
+    allStepsRef,
+    opcodeIndexRef,
+    currentStepIndexRef,
+    panelRefs: {
+      opcode: opcodeScrollRef,
+      stack: stackScrollRef,
+      memory: memoryScrollRef,
+      storage: storageScrollRef,
+    },
   });
 
   const activeFrame = callFrames.find((f) => f.id === activeTab);
@@ -751,6 +770,12 @@ function App() {
                   onToggleBreakpoint={(pc) => handleToggleBreakpoint(activeTab, pc)}
                   scanUrl={scanUrl}
                   onSeekTo={seekToWithHistory}
+                  scrollContainerRefs={{
+                    opcode: opcodeScrollRef,
+                    stack: stackScrollRef,
+                    memory: memoryScrollRef,
+                    storage: storageScrollRef,
+                  }}
                 />
               </div>
               <BookmarksDrawer
@@ -804,6 +829,10 @@ function App() {
         }}
       />
       {/* <NotesDrawer onSeekTo={seekToWithHistory} /> */}
+      <HintOverlay />
+      <PanelHintOverlay />
+      <KeyboardShortcutsHelpDialog />
+      <CommandPaletteDialog />
       <Toaster />
     </div>
     </FloatingPanelProvider>

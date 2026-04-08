@@ -25,7 +25,7 @@ fn scripts_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(base.join("scripts"))
 }
 
-fn normalize_rel_path(rel: &str) -> Result<PathBuf, String> {
+pub fn normalize_rel_path(rel: &str) -> Result<PathBuf, String> {
     let p = Path::new(rel);
     if p.is_absolute() {
         return Err("Invalid path: absolute".into());
@@ -42,20 +42,20 @@ fn normalize_rel_path(rel: &str) -> Result<PathBuf, String> {
     Ok(out)
 }
 
-fn rel_depth(rel: &Path) -> usize {
+pub fn rel_depth(rel: &Path) -> usize {
     rel.components()
         .filter(|c| matches!(c, Component::Normal(_)))
         .count()
 }
 
-fn ensure_max_depth(rel: &Path, max_depth: usize) -> Result<(), String> {
+pub fn ensure_max_depth(rel: &Path, max_depth: usize) -> Result<(), String> {
     if rel_depth(rel) > max_depth {
         return Err(format!("Path too deep (max {max_depth} levels)"));
     }
     Ok(())
 }
 
-fn rel_path_to_slash(rel: &Path) -> String {
+pub fn rel_path_to_slash(rel: &Path) -> String {
     rel.components()
         .filter_map(|c| match c {
             Component::Normal(s) => Some(s.to_string_lossy()),

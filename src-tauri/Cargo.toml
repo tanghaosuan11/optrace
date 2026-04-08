@@ -40,6 +40,8 @@ rquickjs = { version = "0.6", features = ["bindgen"] }
 sha2 = "0.10"
 hex = "0.4"
 
+[dev-dependencies]
+revm = "36.0.0"
 
 [profile.release]
 # Shrink the final `.app` / Mach-O (Tauri embeds `dist` + native code).

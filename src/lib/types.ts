@@ -4,7 +4,7 @@
  */
 
 import type { Opcode } from "./opcodes";
-import type { ParsedStepBatchResult, StepData } from "./stepPlayer";
+import type { ParsedStepBatchResult, StepData, StepStackEntry } from "./stepPlayer";
 
 export enum MsgType {
     StepBatch = 1,
@@ -18,6 +18,8 @@ export enum MsgType {
     FrameExit = 9,
     SelfDestruct = 10,
     BalanceChanges = 11,
+    KeccakOp = 12,
+    StateChange = 13,
     Finished = 255,
 }
 
@@ -97,6 +99,38 @@ export interface StorageChangeEntry {
     transactionId?: number;
 }
 
+export type StateChangeCategory = "account" | "balance" | "nonce";
+export type StateChangeKind =
+    | "AccountCreated" | "AccountDestroyed"
+    | "BalanceChange" | "BalanceTransfer"
+    | "NonceChange" | "NonceBump";
+
+/** EVM journal 中捕获的账户/余额/nonce 变化事件 */
+export interface StateChangeEntry {
+    stepIndex: number;
+    transactionId: number;
+    frameId: number;
+    category: StateChangeCategory;
+    kind: StateChangeKind;
+    // AccountCreated / AccountDestroyed / NonceChange / NonceBump / BalanceChange
+    address?: string;
+    // AccountCreated
+    isCreatedGlobally?: boolean;
+    // AccountDestroyed
+    target?: string;
+    hadBalance?: string;
+    // BalanceChange
+    oldBalance?: string;
+    newBalance?: string;
+    // BalanceTransfer
+    from?: string;
+    to?: string;
+    balance?: string;
+    // NonceChange / NonceBump
+    previousNonce?: number;
+    newNonce?: number;
+}
+
 export interface StateDiff {
     address: string;
     key: string;
@@ -153,7 +187,7 @@ export interface CallFrame {
     selfdestructValue?: string;
 }
 
-export type CallTreeNodeType = 'frame' | 'sload' | 'sstore' | 'tload' | 'tstore' | 'log';
+export type CallTreeNodeType = 'frame' | 'sload' | 'sstore' | 'tload' | 'tstore' | 'log' | 'keccak256';
 
 export interface CallTreeNode {
     id: number;
@@ -172,14 +206,35 @@ export interface CallTreeNode {
     success?: boolean;
     gasUsed?: number;
     reverted?: boolean;
+    /** True when this frame itself succeeded but an ancestor frame failed, causing its state changes to be rolled back. */
+    revertedByParent?: boolean;
     slot?: string;
     newValue?: string;
     oldValue?: string;
     topics?: string[];
     logData?: string;
+    /** KECCAK256: input byte length */
+    keccakInputLength?: number;
+    /** KECCAK256: short hex preview of input (full input may be large) */
+    keccakInputPreview?: string;
+    /** KECCAK256: 32-byte result 0x… */
+    keccakHash?: string;
     selfdestructContract?: string;
     selfdestructTarget?: string;
     selfdestructValue?: string;
+}
+
+/** KeccakOp 消息解析结果 */
+export interface KeccakEntry {
+    transactionId: number;
+    contextId: number;
+    stepIndex: number;
+    /** 32字节 hash， hex 0x... */
+    hash: string;
+    /** 完整输入 hex 0x... */
+    input: string;
+    /** 输入字节数 */
+    inputLength: number;
 }
 
 export interface MessageRuntimeState {
@@ -207,6 +262,12 @@ export interface MessageRuntimeState {
     stepBatchPendingResults: Map<number, ParsedStepBatchResult>;
     finishedDeferred: boolean;
     startDebugInFlight: boolean;
+    /** 流式阶段暂存的 compact 批次，Finished 时一次性展开 */
+    allCompactBatches: Array<{ compact: Float64Array; stackEntries: StepStackEntry[] }>;
+    /** 流式阶段已接收总步数（allStepsRef 在 Finished 后才填充） */
+    totalStreamedStepCount: number;
+    /** KeccakOp 消息橊，tid → contextId → stepIndex，与 storageChangeMap 结构一致 */
+    keccakOps: Map<number, Map<number, Map<number, KeccakEntry>>>;
 }
 
 export interface MessageHandlerContext {

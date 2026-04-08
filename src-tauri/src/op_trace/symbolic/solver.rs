@@ -156,7 +156,37 @@ pub fn build_smt2_query(
 
 fn has_uninterpreted_ops(e: &Expr) -> bool {
     match e {
-        Expr::Exp(..) | Expr::Signext(..) | Expr::Byteop(..) => true,
+        Expr::Exp(base, exp) => {
+            // 小常量指数展开为乘法链，不需要 UF — 但仍需检查 base
+            if let Expr::Const(h) = exp.as_ref() {
+                let exp_val = u64::from_str_radix(
+                    &h[h.len().saturating_sub(16)..], 16
+                ).unwrap_or(u64::MAX);
+                if exp_val > 8 {
+                    true
+                } else {
+                    has_uninterpreted_ops(base)
+                }
+            } else {
+                true
+            }
+        }
+        Expr::Byteop(i, x) => {
+            // i 为常量时用精确 BV extract，不需要 UF — 但仍需检查 x
+            if matches!(i.as_ref(), Expr::Const(_)) {
+                has_uninterpreted_ops(x)
+            } else {
+                true
+            }
+        }
+        Expr::Signext(b, x) => {
+            // b 为常量时用精确 BV sign_extend，不需要 UF
+            if matches!(b.as_ref(), Expr::Const(_)) {
+                has_uninterpreted_ops(x)
+            } else {
+                true
+            }
+        }
         Expr::Const(_) | Expr::Sym(_) | Expr::Keccak(..) => false,
         Expr::Not(a) | Expr::Iszero(a) => has_uninterpreted_ops(a),
         Expr::Add(a,b)  | Expr::Sub(a,b)  | Expr::Mul(a,b)  | Expr::Div(a,b)
@@ -171,8 +201,185 @@ fn has_uninterpreted_ops(e: &Expr) -> bool {
     }
 }
 
-/// 求解结果
+/// 求解失败原因分类
 #[derive(Debug, Clone, Serialize)]
+#[serde(tag = "code")]
+pub enum UnsatReason {
+    /// 路径约束自相矛盾（快速判断：前缀已锁死该条件）
+    PathContradiction { conflict_step: Option<u32> },
+    /// 目标条件本身已是具体常量，无符号依赖
+    ConcreteCondition,
+    /// 减少的符号源
+    NoUsefulSources,
+}
+
+/// Unknown 原因分类
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "code")]
+pub enum UnknownReason {
+    /// 包含无解释函数（UF）导致无法精确求解
+    UninterpretedFunctions { uf_count: usize },
+    /// Z3 超时（约束太多）
+    Timeout,
+    /// 其他原因
+    Other { detail: String },
+}
+
+/// 对 SolverResult 的说明层——诊断失败原因并给出建议
+#[derive(Debug, Clone, Serialize)]
+pub struct SolveExplain {
+    /// Unsat/Unknown 的具体原因分类
+    pub category: ExplainCategory,
+    /// 人读说明
+    pub message: String,
+    /// 具体建议（例如“尝试将 offset 36 加为符号源”）
+    pub suggestions: Vec<String>,
+    /// 有效符号约束数
+    pub symbolic_constraint_count: usize,
+    /// 包含 UF 的约束数（应设为 0 才能精确求解）
+    pub uf_constraint_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind")]
+pub enum ExplainCategory {
+    UnsatPath(UnsatReason),
+    UnknownSolver(UnknownReason),
+    Error,
+}
+
+/// 说明一个失败项的原因
+pub fn explain_solve(
+    result: &SolverResult,
+    path_constraints: &[PathConstraint],
+    target_step: u32,
+    target_transaction_id: u32,
+    target_condition: &Expr,
+    _sym_vars: &[String],
+) -> Option<SolveExplain> {
+    match result {
+        SolverResult::Sat { .. } => None, // 成功无需解释
+        SolverResult::Error { .. } => Some(SolveExplain {
+            category: ExplainCategory::Error,
+            message: "系统错误（Z3 未找到或运行失败）".into(),
+            suggestions: vec!["1. 确认 Z3 已安装（brew install z3）".into(),
+                               "2. 检查 z3_path 设置".into()],
+            symbolic_constraint_count: 0,
+            uf_constraint_count: 0,
+        }),
+        SolverResult::Unsat { .. } => {
+            // 诊断原因
+            let relevant: Vec<&PathConstraint> = path_constraints.iter()
+                .filter(|c| c.transaction_id == target_transaction_id && c.step < target_step
+                    && !c.condition.symbols().is_empty())
+                .collect();
+
+            // 判断是否具体条件
+            if target_condition.is_concrete() {
+                return Some(SolveExplain {
+                    category: ExplainCategory::UnsatPath(UnsatReason::ConcreteCondition),
+                    message: "目标 JUMPI 条件是具体常量，尚未传入任何符号变量".into(),
+                    suggestions: vec![
+                        "请先运行 symbolic_slice 确认该 JUMPI 确实有符号依赖".into(),
+                        "或者使用 symbolic_auto_solve 它会自动找符号源".into(),
+                    ],
+                    symbolic_constraint_count: relevant.len(),
+                    uf_constraint_count: 0,
+                });
+            }
+
+            // 找冲突约束：路径中是否有与目标方向相反的约束
+            let conflict_step = find_conflict_step(path_constraints, target_step, target_transaction_id, target_condition);
+
+            let suggest = if let Some(cs) = conflict_step {
+                vec![format!("步骤 {} 的路径约束与目标方向冲突，尝试 goal=SkipJump/TakeJump 切换方向试试", cs)]
+            } else {
+                vec!["尝试切换 goal：如果你要 TakeJump 尝试 SkipJump，反之亦然".into()]
+            };
+
+            Some(SolveExplain {
+                category: ExplainCategory::UnsatPath(UnsatReason::PathContradiction { conflict_step }),
+                message: format!(
+                    "路径约束与目标冲突，无满足所有约束的输入。相关约束共 {} 个。",
+                    relevant.len()
+                ),
+                suggestions: suggest,
+                symbolic_constraint_count: relevant.len(),
+                uf_constraint_count: 0,
+            })
+        }
+        SolverResult::Unknown { reason, .. } => {
+            // 计算 UF 数量
+            let uf_count = path_constraints.iter()
+                .filter(|c| c.transaction_id == target_transaction_id
+                    && c.step < target_step
+                    && has_uninterpreted_ops(&c.condition))
+                .count()
+                + if has_uninterpreted_ops(target_condition) { 1 } else { 0 };
+
+            let (ur, msg, sug) = if uf_count > 0 {
+                (
+                    UnknownReason::UninterpretedFunctions { uf_count },
+                    format!("共 {} 个约束包含无解释函数（EXP/BYTE），导致 Z3 无法完全精确求解", uf_count),
+                    vec![
+                        "已对小常量 EXP/BYTE/SIGNEXTEND 做了精确展开，尝试确认这些指令的指数是否确实是小常量".into(),
+                        "考虑简化约束（移除部分前缀路径约束）重试".into(),
+                    ]
+                )
+            } else if reason.contains("timeout") || reason.contains("resource") {
+                (
+                    UnknownReason::Timeout,
+                    "求解超时，约束多且复杂".into(),
+                    vec!["考虑减少符号变量数量重试".into()]
+                )
+            } else {
+                (
+                    UnknownReason::Other { detail: reason.clone() },
+                    format!("Z3 返回 unknown: {}", reason),
+                    vec![]
+                )
+            };
+
+            let relevant_count = path_constraints.iter()
+                .filter(|c| c.transaction_id == target_transaction_id
+                    && c.step < target_step
+                    && !c.condition.symbols().is_empty())
+                .count();
+
+            Some(SolveExplain {
+                category: ExplainCategory::UnknownSolver(ur),
+                message: msg,
+                suggestions: sug,
+                symbolic_constraint_count: relevant_count,
+                uf_constraint_count: uf_count,
+            })
+        }
+    }
+}
+
+/// 尝试冲突约束定位：找到前缀路径中与目标方向所要求的设置最直接冲突的步骤
+fn find_conflict_step(
+    path_constraints: &[PathConstraint],
+    target_step: u32,
+    target_tx: u32,
+    target_condition: &Expr,
+) -> Option<u32> {
+    // 简单预测：找到和目标条件共享符号变量且路径方向相反的最后一个约束
+    let target_syms = target_condition.symbols();
+    if target_syms.is_empty() { return None; }
+
+    path_constraints.iter()
+        .filter(|c| {
+            c.transaction_id == target_tx
+                && c.step < target_step
+                && !c.condition.symbols().is_empty()
+                && c.condition.symbols().intersection(&target_syms).next().is_some()
+        })
+        .max_by_key(|c| c.step)
+        .map(|c| c.step)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status")]
 pub enum SolverResult {
     /// SAT：找到满足所有约束的解
@@ -198,7 +405,7 @@ pub enum SolverResult {
 }
 
 /// 一个符号变量的解
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymInput {
     /// 变量名，如 `"cd_4"`
     pub name: String,
@@ -215,10 +422,9 @@ pub fn run_z3(smt2: &str, z3_path: Option<&str>, target_transaction_id: u32) -> 
     let z3 = z3_path.unwrap_or("z3");
 
     // 每次使用唯一临时文件名，避免并发求解互相覆盖
-    let uid = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos();
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let uid = COUNTER.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
     let tmp = std::env::temp_dir().join(format!("optrace_sym_{}_{}.smt2", pid, uid));
     if let Err(e) = std::fs::write(&tmp, smt2) {

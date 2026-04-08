@@ -7,6 +7,7 @@ export interface CallTreeFilters {
   showSstore: boolean;
   showTload: boolean;
   showTstore: boolean;
+  showKeccak256: boolean;
   showStaticCall: boolean;
   showGas: boolean;
 }
@@ -18,6 +19,7 @@ const DEFAULT_FILTERS: CallTreeFilters = {
   showSstore: true,
   showTload: false,
   showTstore: true,
+  showKeccak256: false,
   showStaticCall: true,
   showGas: false,
 };

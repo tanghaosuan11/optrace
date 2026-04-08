@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, type HTMLAttributes } from "react";
 import { useDebugStore } from "@/store/debugStore";
 import { condTypeToMainSub, scanHitDetailOnly, type ScanHit } from "@/lib/pauseConditions";
 import { VirtualHighlightList } from "@/components/VirtualHighlightList";
@@ -11,6 +11,9 @@ export function ScanHitsList() {
 
   return (
     <VirtualHighlightList<ScanHit>
+      scrollContainerProps={
+        { "data-keyboard-scroll-root": "condList" } as HTMLAttributes<HTMLDivElement>
+      }
       items={scanHits}
       getItemKey={(h, i) => `${h.step_index}-${i}`}
       isRowActive={(h) => h.step_index === currentStepIndex}

@@ -1,0 +1,42 @@
+Filename                               Regions    Missed Regions     Cover   Functions  Missed Functions  Executed       Lines      Missed Lines     Cover    Branches   Missed Branches     Cover
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+analysis.rs                               1213              1213     0.00%          82                82     0.00%         561               561     0.00%           0                 0         -
+commands/analysis_cmd.rs                   210               210     0.00%          25                25     0.00%         121               121     0.00%           0                 0         -
+commands/cfg.rs                             34                34     0.00%           5                 5     0.00%          23                23     0.00%           0                 0         -
+commands/data.rs                           129               129     0.00%          19                19     0.00%          75                75     0.00%           0                 0         -
+commands/debug.rs                          266               266     0.00%          31                31     0.00%         182               182     0.00%           0                 0         -
+commands/fork.rs                            39                39     0.00%           2                 2     0.00%          35                35     0.00%           0                 0         -
+commands/session.rs                         76                33    56.58%           8                 2    75.00%          68                32    52.94%           0                 0         -
+commands/shadow.rs                         198               198     0.00%          18                18     0.00%         109               109     0.00%           0                 0         -
+commands/symbolic.rs                       147               147     0.00%          11                11     0.00%          87                87     0.00%           0                 0         -
+lib.rs                                      21                21     0.00%           2                 2     0.00%          11                11     0.00%           0                 0         -
+main.rs                                      3                 3     0.00%           1                 1     0.00%           3                 3     0.00%           0                 0         -
+op_trace/balance_diff.rs                   243               201    17.28%           9                 4    55.56%          99                76    23.23%           0                 0         -
+op_trace/cache.rs                          131                76    41.98%          10                 5    50.00%          93                58    37.63%           0                 0         -
+op_trace/cfg_builder.rs                    773               773     0.00%          23                23     0.00%         442               442     0.00%           0                 0         -
+op_trace/debug_session.rs                  228                43    81.14%          18                 5    72.22%         172                39    77.33%           0                 0         -
+op_trace/evm_runner.rs                     662               662     0.00%          18                18     0.00%         357               357     0.00%           0                 0         -
+op_trace/fork/mod.rs                       265               154    41.89%          25                14    44.00%         168               108    35.71%           0                 0         -
+op_trace/frame_manager.rs                  161               161     0.00%          32                32     0.00%         147               147     0.00%           0                 0         -
+op_trace/inspector.rs                      974               974     0.00%          40                40     0.00%         682               682     0.00%           0                 0         -
+op_trace/message_encoder.rs                347               347     0.00%          15                15     0.00%         231               231     0.00%           0                 0         -
+op_trace/mod.rs                            181               181     0.00%           5                 5     0.00%         121               121     0.00%           0                 0         -
+op_trace/prestate.rs                        55                55     0.00%           4                 4     0.00%          39                39     0.00%           0                 0         -
+op_trace/scan.rs                           374               374     0.00%           9                 9     0.00%         237               237     0.00%           0                 0         -
+op_trace/shadow.rs                        2842              2842     0.00%          63                63     0.00%        1397              1397     0.00%           0                 0         -
+op_trace/symbolic/engine.rs                918               918     0.00%          37                37     0.00%         449               449     0.00%           0                 0         -
+op_trace/symbolic/expr.rs                  393               239    39.19%          13                 1    92.31%          97                37    61.86%           0                 0         -
+op_trace/symbolic/mod.rs                     3                 3     0.00%           1                 1     0.00%          10                10     0.00%           0                 0         -
+op_trace/symbolic/solver.rs                438               438     0.00%          14                14     0.00%         216               216     0.00%           0                 0         -
+op_trace/tracer/bytecode_tracer.rs          29                29     0.00%           3                 3     0.00%          19                19     0.00%           0                 0         -
+op_trace/tracer/gas_tracer.rs               20                20     0.00%           6                 6     0.00%          23                23     0.00%           0                 0         -
+op_trace/tracer/log_tracer.rs               13                13     0.00%           4                 4     0.00%          14                14     0.00%           0                 0         -
+op_trace/tracer/memory_tracer.rs           131               131     0.00%           3                 3     0.00%         124               124     0.00%           0                 0         -
+op_trace/tracer/patch_applier.rs           169               169     0.00%           2                 2     0.00%         115               115     0.00%           0                 0         -
+op_trace/tracer/storage_tracer.rs           22                22     0.00%           4                 4     0.00%          41                41     0.00%           0                 0         -
+op_trace/types.rs                           22                 0   100.00%           2                 0   100.00%          11                 0   100.00%           0                 0         -
+optrace_journal.rs                         426               426     0.00%          55                55     0.00%         347               347     0.00%           0                 0         -
+scripts_fs.rs                              422               374    11.37%          49                43    12.24%         227               193    14.98%           0                 0         -
+sourcify.rs                                222               222     0.00%          26                26     0.00%         134               134     0.00%           0                 0         -
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+TOTAL                                    12800             12140     5.16%         694               634     8.65%        7287              6895     5.38%           0                 0         -

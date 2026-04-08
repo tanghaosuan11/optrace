@@ -28,7 +28,28 @@ export type CommandId =
   | "ui.toggleAnalysis"
   | "ui.toggleBookmarks"
   | "ui.toggleCondList"
-  | "ui.toggleCallTree";
+  | "ui.toggleCallTree"
+  | "ui.toggleNotes"
+  | "ui.enterHintMode"
+  | "ui.openPanelSelector"
+  // 跳转导航（对齐 Foundry）
+  | "debug.prevJump"
+  | "debug.nextJump"
+  | "debug.prevCall"
+  | "debug.nextCall"
+  | "debug.prevFrame"
+  | "debug.nextFrame"
+  // 面板焦点切换与滚动
+  | "ui.focusNextPanel"
+  | "ui.focusPrevPanel"
+  | "ui.scrollUp"
+  | "ui.scrollDown"
+  | "ui.pageUp"
+  | "ui.pageDown"
+  | "ui.openKeyboardShortcutsHelp"
+  | "ui.openCommandPalette"
+  | "ui.openCommandPaletteStepJump"
+  | "ui.openCommandPaletteFrameJump";
 
 const _registry = new Map<CommandId, () => void>();
 

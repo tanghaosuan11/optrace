@@ -13,28 +13,43 @@ fn slot_hex(v: U256) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+/// 帧的调用方式
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FrameKind {
+    Normal,
+    Delegate,
+}
 
 struct SymFrame {
     /// 影子栈：与 EVM 栈一一对应，None = 具体值，Some = 含符号
     sym_stack: Vec<Option<Expr>>,
-    /// 内存符号追踪：key = MSTORE/MLOAD 偏移量（精确字节偏移）
+    /// 内存符号追踪：key = 精确字节偏移
     sym_mem: HashMap<usize, Option<Expr>>,
     /// calldata 符号映射：key = CALLDATALOAD 偏移量
     calldata_sym: HashMap<usize, Option<Expr>>,
-    /// 存储符号追踪：key = slot（32字节大端序十六进制），value = 符号表达式
+    /// 存储符号追踪：key = slot hex
     sym_storage: HashMap<String, Option<Expr>>,
-    /// 为下一次 CALL 准备的内层 calldata 符号（在 on_step(CALL) 时计算）
+    /// transient storage 符号追踪
+    sym_transient: HashMap<String, Option<Expr>>,
+    /// 为下一次 CALL 准备的内层 calldata 符号
     pending_call_cdata: Option<HashMap<usize, Option<Expr>>>,
+    /// 子帧 RETURN 后暂存的返回数据符号
+    pending_return_data: Vec<(usize, Option<Expr>)>,
+    /// 帧类型
+    kind: FrameKind,
 }
 
 impl SymFrame {
-    fn new(calldata_sym: HashMap<usize, Option<Expr>>) -> Self {
+    fn new(calldata_sym: HashMap<usize, Option<Expr>>, kind: FrameKind) -> Self {
         Self {
             sym_stack: Vec::new(),
             sym_mem: HashMap::new(),
             calldata_sym,
             sym_storage: HashMap::new(),
+            sym_transient: HashMap::new(),
             pending_call_cdata: None,
+            pending_return_data: Vec::new(),
+            kind,
         }
     }
 }
@@ -67,22 +82,37 @@ impl SymbolicEngine {
                 .and_then(|f| f.pending_call_cdata.take())
                 .unwrap_or_default()
         };
-        self.frames.push(SymFrame::new(calldata_sym));
+        self.frames.push(SymFrame::new(calldata_sym, FrameKind::Normal));
     }
 
     /// 仅用 pending_call_cdata 推入内层帧（离线重放时调用）
-    pub fn push_inner_frame(&mut self) {
+    pub fn push_inner_frame(&mut self, kind: FrameKind) {
         let calldata_sym = self.frames.last_mut()
             .and_then(|f| f.pending_call_cdata.take())
             .unwrap_or_default();
-        self.frames.push(SymFrame::new(calldata_sym));
+        let mut frame = SymFrame::new(calldata_sym, kind);
+        // DELEGATECALL: 子帧共享父帧的 storage 和 transient storage
+        if kind == FrameKind::Delegate {
+            if let Some(parent) = self.frames.last() {
+                frame.sym_storage = parent.sym_storage.clone();
+                frame.sym_transient = parent.sym_transient.clone();
+            }
+        }
+        self.frames.push(frame);
     }
 
     /// 弹出内层帧，将 CALL 结果（concrete None）推入父帧栈顶
     pub fn pop_frame(&mut self) {
-        if self.frames.pop().is_some() {
-            // CALL/CREATE 的成功标志是具体值（0 或 1），不参与符号化
+        if let Some(child) = self.frames.pop() {
             if let Some(parent) = self.frames.last_mut() {
+                // DELEGATECALL: 把子帧修改过的 storage/transient 合并回父帧
+                if child.kind == FrameKind::Delegate {
+                    parent.sym_storage = child.sym_storage;
+                    parent.sym_transient = child.sym_transient;
+                }
+                // 暂存子帧的 return data 符号，供 RETURNDATACOPY 使用
+                parent.pending_return_data = child.pending_return_data;
+                // CALL/CREATE 的成功标志是具体值（0 或 1），不参与符号化
                 parent.sym_stack.push(None);
             }
         }
@@ -142,15 +172,12 @@ impl SymbolicEngine {
     fn prepare_inner_calldata(&mut self, args_offset: usize, args_size: usize) {
         let mut inner = HashMap::new();
         if let Some(frame) = self.frames.last() {
-            // ABI 参数通常是 32 字节对齐；每个内层 calldata 字 = 父内存的一个字
-            let mut inner_offset = 0usize;
-            let mut mem_cursor = args_offset;
-            while inner_offset < args_size {
-                if let Some(Some(expr)) = frame.sym_mem.get(&mem_cursor) {
-                    inner.insert(inner_offset, Some(expr.clone()));
+            let end = args_offset.saturating_add(args_size);
+            // 扫描 sym_mem 中所有落在 [args_offset, end) 范围内的条目
+            for (&mem_off, val) in &frame.sym_mem {
+                if mem_off >= args_offset && mem_off < end {
+                    inner.insert(mem_off - args_offset, val.clone());
                 }
-                inner_offset += 32;
-                mem_cursor += 32;
             }
         }
         if let Some(frame) = self.frames.last_mut() {
@@ -289,20 +316,25 @@ impl SymbolicEngine {
                 let size   = sv(1).as_limbs()[0] as usize;
                 self.pop_sym(); // offset
                 self.pop_sym(); // size
-                let mut inputs = Vec::new();
+                let mut inputs: Vec<(usize, Expr)> = Vec::new();
                 if let Some(frame) = self.frames.last() {
-                    for word_start in (offset..offset.saturating_add(size)).step_by(32) {
-                        if let Some(Some(e)) = frame.sym_mem.get(&word_start) {
-                            inputs.push(e.clone());
+                    let end = offset.saturating_add(size);
+                    // 扫描所有落在 [offset, end) 范围内的符号内存条目
+                    for (&mem_off, val) in &frame.sym_mem {
+                        if mem_off >= offset && mem_off < end {
+                            if let Some(e) = val {
+                                inputs.push((mem_off, e.clone()));
+                            }
                         }
                     }
+                    inputs.sort_by_key(|(off, _)| *off);
                 }
                 let result = if inputs.is_empty() {
                     None
                 } else {
                     let uid = self.keccak_counter;
                     self.keccak_counter += 1;
-                    Some(Expr::Keccak(uid, inputs))
+                    Some(Expr::Keccak(uid, inputs.into_iter().map(|(_, e)| e).collect()))
                 };
                 self.push_sym(result);
             }
@@ -378,22 +410,45 @@ impl SymbolicEngine {
                 let cd_offset  = sv(1).as_limbs()[0] as usize;
                 let size       = sv(2).as_limbs()[0] as usize;
                 self.pop_sym(); self.pop_sym(); self.pop_sym();
-                // 如果 calldata 中有符号，按字写入 sym_mem
-                for i in (0..size).step_by(32) {
-                    let src_off = cd_offset + i;
-                    let dst_off = dest + i;
-                    let sym = self.frames.last()
-                        .and_then(|f| f.calldata_sym.get(&src_off))
-                        .cloned()
-                        .unwrap_or(None);
+                // 扫描 calldata_sym 中落在 [cd_offset, cd_offset+size) 范围内的所有条目
+                let mut to_write = Vec::new();
+                if let Some(frame) = self.frames.last() {
+                    let end = cd_offset.saturating_add(size);
+                    for (&off, val) in &frame.calldata_sym {
+                        if off >= cd_offset && off < end {
+                            to_write.push((dest + (off - cd_offset), val.clone()));
+                        }
+                    }
+                }
+                for (dst_off, sym) in to_write {
                     self.mem_write(dst_off, sym);
                 }
             }
 
-            // CODECOPY / RETURNDATACOPY (pop 3, push 0)
-            0x39 | 0x3e => {
+            // CODECOPY (pop 3, push 0)
+            0x39 => {
                 self.pop_sym(); self.pop_sym(); self.pop_sym();
-                // 不追踪 code/returndata 的符号性
+            }
+
+            // RETURNDATACOPY (pop 3, push 0) — 从子帧的 return data 恢复符号
+            0x3e => {
+                let dest_offset = sv(0).as_limbs()[0] as usize;
+                let ret_offset  = sv(1).as_limbs()[0] as usize;
+                let size        = sv(2).as_limbs()[0] as usize;
+                self.pop_sym(); self.pop_sym(); self.pop_sym();
+                let end = ret_offset.saturating_add(size);
+                let mut to_write = Vec::new();
+                if let Some(frame) = self.frames.last() {
+                    // 扫描 pending_return_data 中落在 [ret_offset, end) 范围内的所有条目
+                    for (off, sym) in &frame.pending_return_data {
+                        if *off >= ret_offset && *off < end {
+                            to_write.push((dest_offset + (*off - ret_offset), sym.clone()));
+                        }
+                    }
+                }
+                for (dst, sym) in to_write {
+                    self.mem_write(dst, sym);
+                }
             }
 
             // EXTCODECOPY (pop 4, push 0)
@@ -401,11 +456,23 @@ impl SymbolicEngine {
                 self.pop_sym(); self.pop_sym(); self.pop_sym(); self.pop_sym();
             }
 
-            // MLOAD (pop 1, push 1)
+            // MLOAD (pop 1, push 1) — 扫描 [offset, offset+32) 范围内的所有符号
             0x51 => {
                 let offset = sv(0).as_limbs()[0] as usize;
                 self.pop_sym();
-                let result = self.mem_read(offset);
+                // 优先精确匹配（绝大多数 MLOAD 对应同偏移的 MSTORE）
+                let result = if let Some(exact) = self.mem_read(offset) {
+                    Some(exact)
+                } else {
+                    // 回退：扫描 [offset, offset+32) 中最近的符号条目（处理 MSTORE8 等非对齐写入）
+                    self.frames.last().and_then(|f| {
+                        let end = offset + 32;
+                        f.sym_mem.iter()
+                            .filter(|(&k, v)| k > offset && k < end && v.is_some())
+                            .min_by_key(|(&k, _)| k)
+                            .and_then(|(_, v)| v.clone())
+                    })
+                };
                 self.push_sym(result);
             }
 
@@ -418,24 +485,48 @@ impl SymbolicEngine {
             }
 
             // MSTORE8 (pop 2, push 0)
+            // 真实 EVM：memory[offset] = value & 0xFF（单字节写入）
+            // 近似策略：在精确字节偏移处记录符号，MLOAD 会扫描 32 字节范围来发现它
             0x53 => {
                 let offset = sv(0).as_limbs()[0] as usize;
                 self.pop_sym(); // offset
                 let val_sym = self.pop_sym();
-                // 写入包含该字节的 32 字节字（近似）
-                let word_off = offset & !31;
-                self.mem_write(word_off, val_sym);
+                if val_sym.is_some() {
+                    // 只在有符号时写入；截断语义近似为 And(val, 0xFF)
+                    let truncated = val_sym.map(|e| Expr::And(
+                        Box::new(e),
+                        Box::new(Expr::konst({
+                            let mut b = [0u8; 32];
+                            b[31] = 0xff;
+                            b
+                        })),
+                    ));
+                    self.mem_write(offset, truncated);
+                }
             }
 
             // SLOAD (pop 1, push 1)
             0x54 => {
                 let slot_key = slot_hex(sv(0));
-                self.pop_sym(); // slot（丢弃 slot 本身的符号性，用具体值查找）
-                let stored = self.frames.last()
-                    .and_then(|f| f.sym_storage.get(&slot_key))
-                    .cloned()
-                    .unwrap_or(None);
-                self.push_sym(stored);
+                self.pop_sym();
+                // 优先检查 sym_storage：key 存在即表示该 slot 已被 SSTORE 写入，
+                // 无论 value 是 Some(符号) 还是 None(具体值) 都不应回退到 storage_symbols
+                let has_in_storage = self.frames.last()
+                    .map(|f| f.sym_storage.contains_key(&slot_key))
+                    .unwrap_or(false);
+                let result = if has_in_storage {
+                    self.frames.last()
+                        .and_then(|f| f.sym_storage.get(&slot_key))
+                        .cloned()
+                        .unwrap_or(None)
+                } else {
+                    // 未被 SSTORE → 检查 config.storage_symbols（链上初始状态符号）
+                    self.config.storage_symbols.iter()
+                        .find(|(slot, _)| *slot == slot_key)
+                        .map(|(_, name)| Some(Expr::Sym(name.clone())))
+                        .unwrap_or(None)
+                };
+                self.push_sym(result);
             }
 
             // SSTORE (pop 2, push 0)
@@ -451,14 +542,23 @@ impl SymbolicEngine {
 
             // TLOAD (pop 1, push 1)
             0x5c => {
+                let slot_key = slot_hex(sv(0));
                 self.pop_sym();
-                self.push_sym(None);
+                let stored = self.frames.last()
+                    .and_then(|f| f.sym_transient.get(&slot_key))
+                    .cloned()
+                    .unwrap_or(None);
+                self.push_sym(stored);
             }
 
             // TSTORE (pop 2, push 0)
             0x5d => {
+                let slot_key = slot_hex(sv(0));
                 self.pop_sym();
-                self.pop_sym();
+                let val_sym = self.pop_sym();
+                if let Some(f) = self.frames.last_mut() {
+                    f.sym_transient.insert(slot_key, val_sym);
+                }
             }
 
             // MCOPY (pop 3, push 0)
@@ -467,11 +567,14 @@ impl SymbolicEngine {
                 let src  = sv(1).as_limbs()[0] as usize;
                 let size = sv(2).as_limbs()[0] as usize;
                 self.pop_sym(); self.pop_sym(); self.pop_sym();
+                let src_end = src.saturating_add(size);
                 let mut to_write: Vec<(usize, Option<Expr>)> = Vec::new();
                 if let Some(frame) = self.frames.last() {
-                    for i in (0..size).step_by(32) {
-                        let sym = frame.sym_mem.get(&(src + i)).cloned().unwrap_or(None);
-                        to_write.push((dst + i, sym));
+                    // 扫描 sym_mem 中所有落在 [src, src+size) 范围内的条目
+                    for (&mem_off, val) in &frame.sym_mem {
+                        if mem_off >= src && mem_off < src_end {
+                            to_write.push((dst + (mem_off - src), val.clone()));
+                        }
                     }
                 }
                 for (off, sym) in to_write {
@@ -502,10 +605,47 @@ impl SymbolicEngine {
                 }
             }
 
-            // RETURN / REVERT (pop 2, push 0)
-            0xf3 | 0xfd => {
+            // RETURN (pop 2, push 0) — 捕获 return data 中的符号
+            0xf3 => {
+                let offset = sv(0).as_limbs()[0] as usize;
+                let size   = sv(1).as_limbs()[0] as usize;
                 self.pop_sym(); // offset
                 self.pop_sym(); // size
+                // 把返回数据范围 [offset..offset+size) 内的符号暂存，供父帧 RETURNDATACOPY 使用
+                let mut ret_syms = Vec::new();
+                if let Some(frame) = self.frames.last() {
+                    let end = offset.saturating_add(size);
+                    for (&mem_off, val) in &frame.sym_mem {
+                        if mem_off >= offset && mem_off < end {
+                            ret_syms.push((mem_off - offset, val.clone()));
+                        }
+                    }
+                    ret_syms.sort_by_key(|(off, _)| *off);
+                }
+                if let Some(frame) = self.frames.last_mut() {
+                    frame.pending_return_data = ret_syms;
+                }
+            }
+
+            // REVERT (pop 2, push 0) — 同样捕获返回数据符号，供父帧 RETURNDATACOPY 使用
+            0xfd => {
+                let offset = sv(0).as_limbs()[0] as usize;
+                let size   = sv(1).as_limbs()[0] as usize;
+                self.pop_sym();
+                self.pop_sym();
+                let mut ret_syms = Vec::new();
+                if let Some(frame) = self.frames.last() {
+                    let end = offset.saturating_add(size);
+                    for (&mem_off, val) in &frame.sym_mem {
+                        if mem_off >= offset && mem_off < end {
+                            ret_syms.push((mem_off - offset, val.clone()));
+                        }
+                    }
+                    ret_syms.sort_by_key(|(off, _)| *off);
+                }
+                if let Some(frame) = self.frames.last_mut() {
+                    frame.pending_return_data = ret_syms;
+                }
             }
 
             // SELFDESTRUCT (pop 1)
@@ -596,7 +736,13 @@ pub fn replay_from_trace(
 
         // 帧深度升高 → CALL/CREATE 发生了（在上一步 on_step 时 pending_call_cdata 已准备好）
         while cur_depth > prev_depth {
-            engine.push_inner_frame();
+            // 判断是否为 DELEGATECALL：前一步的 opcode 为 0xf4 且只升一层
+            let kind = if i > 0 && trace[i - 1].opcode == 0xf4 && cur_depth == prev_depth + 1 {
+                FrameKind::Delegate
+            } else {
+                FrameKind::Normal
+            };
+            engine.push_inner_frame(kind);
             prev_depth += 1;
         }
         // 帧深度降低 → RETURN/REVERT 发生了
@@ -629,9 +775,9 @@ fn opcode_stack_effect(op: u8) -> (usize, usize) {
         0x15 | 0x19 => (1, 1),
         0x20 => (2, 1),
         0x30 | 0x32..=0x34 | 0x36 | 0x38 | 0x3a | 0x3d
-        | 0x41..=0x4a | 0x58..=0x5a => (0, 1),
+        | 0x41..=0x48 | 0x4a | 0x58..=0x5a => (0, 1),
         0x5f | 0x60..=0x7f => (0, 1),
-        0x31 | 0x3b | 0x3f => (1, 1),
+        0x31 | 0x3b | 0x3f | 0x40 | 0x49 => (1, 1),
         0x35 | 0x51 | 0x54 | 0x5c => (1, 1),
         0x37 | 0x39 | 0x3e | 0x5e => (3, 0),
         0x3c => (4, 0),

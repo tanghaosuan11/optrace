@@ -1,8 +1,9 @@
 import { useState, useMemo, useEffect, useRef } from "react";
-import { ChevronRight, ChevronDown, Copy, Check, ListTree, PanelTop } from "lucide-react";
+import { ChevronRight, ChevronDown, Copy, Check, ListTree, PanelTop, Search } from "lucide-react";
 import type { CallTreeNode } from "@/lib/types";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -12,7 +13,7 @@ import {
 } from "@/components/ui/select";
 import fourbyteDb from "@/lib/fourbyteDb.json";
 import { getUserFn } from "@/lib/userFourbyteDb";
-import { useDebugStore } from "@/store/debugStore";
+import { pickKeyboardScrollScope, useDebugStore } from "@/store/debugStore";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { useCallTreeAddressLabels, type AddressLabelMap } from "@/hooks/useCallTreeAddressLabels";
 import { useCallTreeFilters, type CallTreeFilters } from "@/hooks/useCallTreeFilters";
@@ -27,6 +28,7 @@ const CALLTREE_FILTER_TOGGLES: { label: string; key: keyof CallTreeFilters; titl
   { label: "SSTORE", key: "showSstore", title: "Show storage store ops" },
   { label: "TLOAD", key: "showTload", title: "Show transient load ops" },
   { label: "TSTORE", key: "showTstore", title: "Show transient store ops" },
+  { label: "KECCAK", key: "showKeccak256", title: "Show Keccak-256 (memory hash) ops" },
   { label: "STATIC", key: "showStaticCall", title: "Show STATICCALL frames" },
   { label: "GAS", key: "showGas", title: "Show gas used per frame" },
 ];
@@ -97,12 +99,14 @@ function badgeClass(type?: string): string {
     case 'tstore':       return 'bg-fuchsia-100 text-fuchsia-700 border-fuchsia-200 dark:bg-fuchsia-500/15 dark:text-fuchsia-400 dark:border-fuchsia-500/30';
     case 'tload':        return 'bg-cyan-100 text-cyan-700 border-cyan-200 dark:bg-cyan-500/15 dark:text-cyan-400 dark:border-cyan-500/30';
     case 'log':          return 'bg-emerald-100 text-emerald-700 border-emerald-200 dark:bg-emerald-500/15 dark:text-emerald-400 dark:border-emerald-500/30';
+    case 'keccak256':    return 'bg-indigo-100 text-indigo-800 border-indigo-200 dark:bg-indigo-500/15 dark:text-indigo-300 dark:border-indigo-500/30';
     default:             return 'bg-blue-100 text-blue-700 border-blue-200 dark:bg-blue-500/15 dark:text-blue-400 dark:border-blue-500/30';
   }
 }
 
 function badgeLabel(type?: string, extra?: string | number): string {
   if (type === 'log') return `LOG${extra ?? ''}`;
+  if (type === 'keccak256') return 'KECCAK256';
   return (type ?? 'call').toUpperCase();
 }
 
@@ -161,6 +165,55 @@ function CalldataPopover({ input }: { input: string }) {
   );
 }
 
+function KeccakInputPopover({ input }: { input: string }) {
+  const floatingPortalContainer = useFloatingPanelBodyRoot();
+  const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const handleCopy = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    navigator.clipboard.writeText(input);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+  const hex = input.startsWith('0x') ? input.slice(2) : input;
+  // 最长显示 66 个字符（0x + 64 个十六进制字符）
+  const displayText = input.length > 66 ? `${input.slice(0, 66)}…` : input;
+  // 分行显示：无 0x 前缀，每行 64 个字符（32 字节）
+  const lines: string[] = [];
+  for (let i = 0; i < hex.length; i += 64) {
+    lines.push(hex.slice(i, i + 64));
+  }
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <span
+          onClick={e => { e.stopPropagation(); setOpen(o => !o); }}
+          className="inline-flex items-center font-mono flex-shrink min-w-0 border border-foreground/20 rounded-sm px-2 py-0.5 leading-none text-[11px] text-foreground/80 cursor-pointer transition-colors hover:border-foreground/40"
+        >
+          <span className="truncate">{displayText}</span>
+          <span onClick={handleCopy} className="ml-1 opacity-50 hover:opacity-100 transition-opacity flex-shrink-0">
+            {copied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+          </span>
+        </span>
+      </PopoverTrigger>
+      <PopoverContent
+        container={floatingPortalContainer ?? undefined}
+        side="bottom"
+        align="start"
+        sideOffset={4}
+        className="w-auto max-w-[600px] p-2 font-mono text-[11px]"
+        onOpenAutoFocus={e => e.preventDefault()}
+      >
+        <div className="flex flex-col gap-px">
+          {lines.map((line, idx) => (
+            <div key={idx} className="text-foreground/80">{line}</div>
+          ))}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 function getFnLabel(input?: string, resolvedFns?: Record<string, string>): string | null {
   if (!input) return null;
   const hex = input.startsWith('0x') ? input.slice(2) : input;
@@ -182,6 +235,53 @@ function getAddrDisplay(addr: string | undefined, addressLabels: AddressLabelMap
     return { display: label.name || label.label, hasLabel: true };
   }
   return { display: fullAddr(addr), hasLabel: false };
+}
+
+function matchesCallTreeQuery(
+  node: CallTreeNode,
+  query: string,
+  resolvedFns: Record<string, string>,
+  addressLabels: AddressLabelMap,
+): boolean {
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+
+  const bag: string[] = [node.type, `0x${node.stepIndex.toString(16)}`, String(node.stepIndex)];
+
+  if (node.type === "frame") {
+    bag.push("frame", node.callType ?? "call");
+    const addresses = [node.address, node.caller, node.target].filter(Boolean) as string[];
+    for (const addr of addresses) {
+      const normalized = addr.toLowerCase();
+      bag.push(normalized);
+      const label = addressLabels[normalized];
+      if (label) bag.push(label.label ?? "", label.name ?? "");
+    }
+    const fnLabel = getFnLabel(node.input, resolvedFns);
+    if (fnLabel) bag.push(fnLabel);
+    if (node.input) {
+      const hex = node.input.startsWith("0x") ? node.input.slice(2) : node.input;
+      if (hex.length >= 8) bag.push(`0x${hex.slice(0, 8).toLowerCase()}`);
+    }
+  } else if (node.type === "sload") {
+    bag.push("opcode", "0x54", "sload", node.slot ?? "");
+  } else if (node.type === "sstore") {
+    bag.push("opcode", "0x55", "sstore", node.slot ?? "");
+  } else if (node.type === "tload") {
+    bag.push("opcode", "0x5c", "tload", node.slot ?? "");
+  } else if (node.type === "tstore") {
+    bag.push("opcode", "0x5d", "tstore", node.slot ?? "");
+  } else if (node.type === "keccak256") {
+    bag.push("opcode", "0x20", "keccak", "keccak256", "sha3", node.keccakHash ?? "", node.keccakInputPreview ?? "");
+  } else if (node.type === "log") {
+    bag.push("opcode", "log", "log0", "log1", "log2", "log3", "log4");
+    for (const t of node.topics ?? []) bag.push(t);
+  }
+
+  for (const token of bag) {
+    if (token && token.toLowerCase().includes(q)) return true;
+  }
+  return false;
 }
 
 interface NodeRowProps {
@@ -294,10 +394,12 @@ function NodeRow({ node, rowIndex, isCollapsed, isActive, isActiveEvent, hovered
                 <span className="ml-1 text-yellow-300">({node.selfdestructValue} wei)</span>
               )}
             </span>
-          ) : node.success === true ? (
-            <span className="flex-shrink-0 text-[9px] font-bold text-green-400 bg-green-400/10 px-1 rounded ml-0.5">✓</span>
           ) : node.success === false ? (
             <span className="flex-shrink-0 text-[9px] font-bold text-red-400 bg-red-400/10 px-1 rounded ml-0.5">✗ REVERT</span>
+          ) : node.revertedByParent ? (
+            <span className="flex-shrink-0 text-[9px] font-bold text-orange-400/80 bg-orange-400/10 px-1 rounded ml-0.5" title="父 frame 失败，此帧的状态变更已回滚">↩ 父frame回滚</span>
+          ) : node.success === true ? (
+            <span className="flex-shrink-0 text-[9px] font-bold text-green-400 bg-green-400/10 px-1 rounded ml-0.5">✓</span>
           ) : null}
         </div>
       </div>
@@ -384,6 +486,32 @@ function NodeRow({ node, rowIndex, isCollapsed, isActive, isActiveEvent, hovered
     );
   }
 
+  if (node.type === 'keccak256') {
+    const len = node.keccakInputLength ?? 0;
+    const input = node.keccakInputPreview ?? '0x';
+    return (
+      <div
+        className={`flex items-center h-full text-indigo-800 dark:text-indigo-300 cursor-pointer select-none ${isActiveEvent ? 'bg-amber-400/10 border-l-2 border-l-amber-400' : 'hover:bg-muted/40'}`}
+        onClick={() => onSeekTo?.(node.stepIndex)}
+      >
+        <RowPrefix rowIndex={rowIndex} depth={node.depth} />
+        <span className="flex-shrink-0 w-[14px] h-full border-r border-border/40" />
+        <div className="flex items-center gap-1.5 px-1.5 min-w-0 overflow-hidden">
+          <OpBadge type="keccak256" depth={node.depth} />
+          <span className="text-muted-foreground/80 flex-shrink-0 text-[10px]" title="Input byte length">
+            {len} B
+          </span>
+          <span className="text-muted-foreground/70 flex-shrink-0">in</span>
+          <KeccakInputPopover input={input} />
+          <span className="text-muted-foreground/70 flex-shrink-0">→</span>
+          <span className="inline-flex items-center font-mono flex-shrink-0 border border-foreground/20 rounded-sm px-2 py-0.5 leading-none text-[11px] text-foreground/90">
+            {node.keccakHash ?? '—'}
+          </span>
+        </div>
+      </div>
+    );
+  }
+
   // log
   const topicCount = node.topics?.length ?? 0;
   const topic0 = node.topics?.[0];
@@ -401,6 +529,28 @@ function NodeRow({ node, rowIndex, isCollapsed, isActive, isActiveEvent, hovered
       </div>
     </div>
   );
+}
+
+/** 与 NodeRow 点击逻辑一致，供键盘 Enter 使用 */
+function activateCallTreeNode(
+  node: CallTreeNode,
+  opts: {
+    onSeekTo?: (index: number) => void;
+    onSelectFrame?: (frameId: string) => void;
+    onNavigateTo?: (stepIndex: number, frameId: string) => void;
+  },
+) {
+  const { onSeekTo, onSelectFrame, onNavigateTo } = opts;
+  if (node.type === "frame") {
+    const fid = frameTabId(node.transactionId ?? 0, node.contextId);
+    if (onNavigateTo) onNavigateTo(node.stepIndex, fid);
+    else {
+      onSelectFrame?.(fid);
+      onSeekTo?.(node.stepIndex);
+    }
+  } else {
+    onSeekTo?.(node.stepIndex);
+  }
 }
 
 function getVisibleNodes(nodes: CallTreeNode[], collapsed: Set<number>): CallTreeNode[] {
@@ -437,11 +587,19 @@ export function CallTreeViewer({
   const { filters, updateFilter } = useCallTreeFilters();
   
   const [collapsed, setCollapsed] = useState<Set<number>>(new Set());
+  const [searchQuery, setSearchQuery] = useState("");
   const [hoveredAddr, setHoveredAddr] = useState<string | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerHeight, setContainerHeight] = useState(300);
   const [scrollTop, setScrollTop] = useState(0);
+  /** 方向键/Enter 选中的行（visible 下标） */
+  const [keyboardFocusIndex, setKeyboardFocusIndex] = useState<number | null>(null);
+  const keyboardFocusIndexRef = useRef<number | null>(null);
+  useEffect(() => {
+    keyboardFocusIndexRef.current = keyboardFocusIndex;
+  }, [keyboardFocusIndex]);
   const scrollToScopeRef = useRef<{ tid: number; cid: number } | null>(null);
+  const isCallTreeOpen = useDebugStore((s) => s.isCallTreeOpen);
 
   // fourbyte 解析结果
   const resolvedFns = useDebugStore((s) => s.resolvedFnCache);
@@ -474,9 +632,14 @@ export function CallTreeViewer({
     if (!filters.showSstore) result = result.filter(n => n.type !== 'sstore');
     if (!filters.showTload) result = result.filter(n => n.type !== 'tload');
     if (!filters.showTstore) result = result.filter(n => n.type !== 'tstore');
+    if (!filters.showKeccak256) result = result.filter(n => n.type !== 'keccak256');
     if (!filters.showStaticCall) result = result.filter(n => !(n.type === 'frame' && n.callType === 'staticcall'));
+    const q = searchQuery.trim().toLowerCase();
+    if (q) {
+      result = result.filter((n) => matchesCallTreeQuery(n, q, resolvedFns, addressLabels));
+    }
     return result;
-  }, [nodes, filters]);
+  }, [nodes, filters, searchQuery, resolvedFns, addressLabels]);
 
   const visible = useMemo(() => getVisibleNodes(filtered, collapsed), [filtered, collapsed]);
 
@@ -567,6 +730,81 @@ export function CallTreeViewer({
   const startIdx = Math.max(0, Math.floor(scrollTop / ROW_H) - 2);
   const endIdx = Math.min(visible.length, startIdx + Math.ceil(containerHeight / ROW_H) + 5);
 
+  useEffect(() => {
+    setKeyboardFocusIndex((i) => {
+      if (i === null) return null;
+      if (visible.length === 0) return null;
+      return Math.max(0, Math.min(i, visible.length - 1));
+    });
+  }, [visible]);
+
+  useEffect(() => {
+    if (!hideFloatingOpenButton && !isCallTreeOpen) setKeyboardFocusIndex(null);
+  }, [hideFloatingOpenButton, isCallTreeOpen]);
+
+  useEffect(() => {
+    if (keyboardFocusIndex === null) return;
+    const el = containerRef.current;
+    if (!el) return;
+    const targetTop = keyboardFocusIndex * ROW_H;
+    const targetBottom = targetTop + ROW_H;
+    if (targetTop < el.scrollTop || targetBottom > el.scrollTop + el.clientHeight) {
+      el.scrollTop = Math.max(0, targetTop - el.clientHeight / 2 + ROW_H / 2);
+    }
+  }, [keyboardFocusIndex]);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "ArrowUp" && e.key !== "ArrowDown" && e.key !== "Enter") return;
+
+      if (!hideFloatingOpenButton && !useDebugStore.getState().isCallTreeOpen) return;
+
+      const t = e.target as HTMLElement | null;
+      if (!t) return;
+      if (t.closest("input, textarea, select") || t.isContentEditable) return;
+
+      const scrollEl = containerRef.current;
+      if (!scrollEl || visible.length === 0) return;
+
+      const allowFloating = hideFloatingOpenButton;
+      const allowSheet = pickKeyboardScrollScope(useDebugStore.getState()) === "callTree";
+      if (!allowFloating && !allowSheet) return;
+
+      const ae = document.activeElement;
+      const focusInScroll =
+        ae === scrollEl || (ae instanceof Node && scrollEl.contains(ae));
+      const focusLoose =
+        ae === document.body || ae === document.documentElement;
+      if (!focusInScroll && !(focusLoose && (allowSheet || allowFloating))) return;
+
+      if (e.key === "Enter") {
+        const idx = keyboardFocusIndexRef.current;
+        if (idx === null) return;
+        const node = visible[idx];
+        if (!node) return;
+        e.preventDefault();
+        activateCallTreeNode(node, { onSeekTo, onSelectFrame, onNavigateTo });
+        return;
+      }
+
+      e.preventDefault();
+      setKeyboardFocusIndex((prev) => {
+        if (e.key === "ArrowDown") {
+          if (prev === null) return 0;
+          return Math.min(prev + 1, visible.length - 1);
+        }
+        if (e.key === "ArrowUp") {
+          if (prev === null) return Math.max(0, visible.length - 1);
+          return Math.max(0, prev - 1);
+        }
+        return prev;
+      });
+    };
+
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [visible, hideFloatingOpenButton, onSeekTo, onSelectFrame, onNavigateTo]);
+
   const toggleCollapse = (id: number) => {
     setCollapsed(prev => {
       const next = new Set(prev);
@@ -586,7 +824,10 @@ export function CallTreeViewer({
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background">
       {/* toolbar */}
-      <div className="flex min-h-0 flex-nowrap items-center gap-x-1.5 overflow-x-auto border-b border-border bg-muted/60 px-2 py-1 text-[11px] flex-shrink-0">
+      <div
+        data-call-tree-toolbar
+        className="flex min-h-0 flex-nowrap items-center gap-x-1.5 overflow-x-auto border-b border-border bg-muted/60 px-2 py-1 text-[11px] flex-shrink-0"
+      >
         <ListTree className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden />
         <span className="shrink-0 text-[11px] font-semibold tracking-wide text-foreground">Call Tree</span>
         <span className="shrink-0 text-[10px] font-medium text-muted-foreground">expand</span>
@@ -645,8 +886,18 @@ export function CallTreeViewer({
             </div>
           ))}
         </div>
+        <div className="ml-auto flex h-5 min-w-[280px] max-w-[420px] items-center gap-1">
+          <Search className="h-3 w-3 shrink-0 text-muted-foreground" aria-hidden />
+          <Input
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search address / label / opcode / 4byte / function"
+            className="h-5 w-full min-w-[220px] bg-background text-[11px]"
+            aria-label="Search call tree"
+          />
+        </div>
         {onOpenInFloating && !hideFloatingOpenButton ? (
-          <div className="ml-auto flex shrink-0 items-center">
+          <div className="ml-1 flex shrink-0 items-center">
             <button
               type="button"
               className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-sm text-muted-foreground hover:bg-muted hover:text-foreground"
@@ -663,13 +914,24 @@ export function CallTreeViewer({
       {/* virtual list */}
       <div
         ref={containerRef}
-        className="flex-1 overflow-auto font-mono text-[12px]"
+        tabIndex={-1}
+        className="flex-1 overflow-auto font-mono text-[12px] outline-none focus-visible:ring-0"
+        data-keyboard-scroll-root="callTree"
+        onMouseDown={(e) => {
+          if ((e.target as HTMLElement).closest("[data-call-tree-toolbar]")) return;
+          containerRef.current?.focus({ preventScroll: true });
+        }}
         onScroll={e => setScrollTop(e.currentTarget.scrollTop)}
       >
         <div style={{ height: visible.length * ROW_H, position: 'relative' }}>
           {visible.slice(startIdx, endIdx).map((node, i) => (
             <div
               key={node.id}
+              className={
+                keyboardFocusIndex === startIdx + i
+                  ? "ring-1 ring-inset ring-primary/60 rounded-[1px]"
+                  : undefined
+              }
               style={{
                 position: 'absolute',
                 top: (startIdx + i) * ROW_H,

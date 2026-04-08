@@ -1,4 +1,4 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, type HTMLAttributes, type ReactNode } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { cn } from "@/lib/utils";
 
@@ -25,6 +25,8 @@ export type VirtualHighlightListProps<T> = {
   empty?: ReactNode;
   /** 行内容渲染 */
   renderRow: (args: VirtualHighlightListRenderArgs<T>) => ReactNode;
+  /** 合并到滚动容器 div（overflow-auto） */
+  scrollContainerProps?: HTMLAttributes<HTMLDivElement>;
 };
 export function VirtualHighlightList<T>({
   items,
@@ -36,6 +38,7 @@ export function VirtualHighlightList<T>({
   getRowTitle,
   empty,
   renderRow,
+  scrollContainerProps,
 }: VirtualHighlightListProps<T>) {
   const parentRef = useRef<HTMLDivElement>(null);
   const virtualizer = useVirtualizer({
@@ -67,8 +70,13 @@ export function VirtualHighlightList<T>({
     return empty ?? null;
   }
 
+  const { className: scClass, ...scRest } = scrollContainerProps ?? {};
   return (
-    <div ref={parentRef} className="scrollbar-hidden h-full min-h-0 overflow-auto">
+    <div
+      ref={parentRef}
+      className={cn("scrollbar-hidden h-full min-h-0 overflow-auto", scClass)}
+      {...scRest}
+    >
       <div
         className="relative w-full"
         style={{ height: `${virtualizer.getTotalSize()}px` }}

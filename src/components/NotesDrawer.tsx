@@ -166,7 +166,10 @@ export function NotesDrawer({ onSeekTo }: NotesDrawerProps) {
             <div className="px-3 py-1 text-[10px] font-medium text-muted-foreground bg-muted/30 border-b flex-shrink-0">
               Value Records ({valueRecords.length})
             </div>
-            <div className="flex-1 overflow-auto px-2 py-1 space-y-1">
+            <div
+              className="flex-1 overflow-auto px-2 py-1 space-y-1"
+              data-keyboard-scroll-root="notes"
+            >
               {valueRecords.length === 0 ? (
                 <div className="h-full flex items-center justify-center text-muted-foreground text-[11px]">
                   Right-click a stack/memory/storage value → Record Value
@@ -182,7 +185,10 @@ export function NotesDrawer({ onSeekTo }: NotesDrawerProps) {
             <div className="px-3 py-1 text-[10px] font-medium text-muted-foreground bg-muted/30 border-b flex-shrink-0">
               Step Marks ({stepMarks.length})
             </div>
-            <div className="flex-1 overflow-auto px-2 py-1 space-y-1">
+            <div
+              className="flex-1 overflow-auto px-2 py-1 space-y-1"
+              data-keyboard-scroll-root="notes"
+            >
               {stepMarks.length === 0 ? (
                 <div className="h-full flex items-center justify-center text-muted-foreground text-[11px]">
                   Right-click an opcode row → Mark This Step

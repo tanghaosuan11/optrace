@@ -21,6 +21,8 @@ export interface BackendConfig {
   forkMode: boolean;
   /** Shadow 数据流追踪 */
   enableShadow: boolean;
+  /** Hardfork override: "auto" | SpecId name */
+  hardfork: string;
 }
 
 export type AppConfig = FrontendConfig & BackendConfig;
@@ -31,6 +33,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   usePrestate: false,
   forkMode: false,
   enableShadow: false,
+  hardfork: "auto",
   pauseOpJump: true,
   rpcUrl: "https://mainnet.infura.io/v3/c60b0bb42f8a4c6481ecd229eddaca27",
   scanUrl: "https://etherscan.io/",
@@ -81,5 +84,6 @@ export function getBackendConfig(): BackendConfig {
     usePrestate: _config.usePrestate,
     forkMode: _config.forkMode,
     enableShadow: _config.enableShadow,
+    hardfork: _config.hardfork,
   };
 }

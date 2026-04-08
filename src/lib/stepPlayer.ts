@@ -34,7 +34,11 @@ export interface StepData {
 }
 
 export interface ParsedStepBatchResult {
-  steps: StepData[];
+  /** Worker 侧返回的原始 compact buffer（每步 8 个 float64） */
+  compact: Float64Array;
+  stackEntries: StepStackEntry[];
+  /** = compact.length / 8 */
+  stepCount: number;
   /** key = `${transactionId}:${contextId}` */
   contextLocalIndexes: Array<[string, number[]]>;
   opcodeLocalIndexes: Array<[number, number[]]>;
@@ -44,6 +48,7 @@ export interface ParsedStepBatchResult {
 
 // 需要保留部分栈数据的 opcode 集合
 const _NEEDS_STACK = new Set([
+  0x20, // KECCAK256: size (top), offset
   0x54, // SLOAD
   0x55, // SSTORE
   0xa1, 0xa2, 0xa3, 0xa4, // LOG1-LOG4
@@ -320,6 +325,26 @@ export function buildIndexesFromCompact(compact: Float64Array): Pick<ParsedStepB
  * 主线程侧：将 compact Float64Array + stackEntries 拆包为 StepData[]。
  * 紧凑循环，无结构化克隆开销。
  */
+/**
+ * 从 compact 中单步提取（流式阶段稀疏访问用，如首步导航）。
+ */
+export function unpackCompactStep(compact: Float64Array, stackEntries: StepStackEntry[], localIndex: number): StepData {
+  const b = localIndex * 8;
+  const step: StepData = {
+    transactionId: compact[b]!,
+    contextId:     compact[b + 1]!,
+    depth:         compact[b + 2]!,
+    pc:            compact[b + 3]!,
+    opcode:        compact[b + 4]!,
+    gasCost:       compact[b + 5]!,
+    gasRemaining:  compact[b + 6]!,
+    frameStepCount: compact[b + 7]!,
+  };
+  const se = stackEntries.find(e => e.i === localIndex);
+  if (se) { step.stackTop = se.top; step.stackSecond = se.sec; step.stackThird = se.third; }
+  return step;
+}
+
 export function unpackCompactToSteps(compact: Float64Array, stackEntries: StepStackEntry[]): StepData[] {
   const N = (compact.length / 8) | 0;
   const steps = new Array<StepData>(N);

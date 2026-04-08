@@ -169,7 +169,11 @@ export function GlobalLogDrawer({ onSeekTo }: Props) {
           </SheetClose>
         </div>
 
-        <div ref={parentRef} className="flex-1 min-h-0 overflow-auto">
+        <div
+          ref={parentRef}
+          className="flex-1 min-h-0 overflow-auto"
+          data-keyboard-scroll-root="logs"
+        >
           {allLogs.length === 0 ? (
             <div className="p-8 text-center text-muted-foreground text-sm">No logs emitted</div>
           ) : (

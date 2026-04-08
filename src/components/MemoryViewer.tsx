@@ -24,15 +24,19 @@ export interface MemoryHighlightRange {
 interface MemoryViewerProps {
   highlightRanges?: MemoryHighlightRange[];
   onSelectionChange?: (range: { start: number; end: number } | null) => void;
+  scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
 }
 
 const ROW_HEIGHT = 24;
 const BYTES_PER_ROW = 32;
 
-export function MemoryViewer({ highlightRanges = [], onSelectionChange }: MemoryViewerProps) {
+export function MemoryViewer({ highlightRanges = [], onSelectionChange, scrollContainerRef }: MemoryViewerProps) {
   const memory = useDebugStore((s) => s.memory);
+  const activePanelId = useDebugStore((s) => s.activePanelId);
+  const isActive = activePanelId === "memory";
 
-  const parentRef = useRef<HTMLDivElement>(null);
+  const internalRef = useRef<HTMLDivElement>(null);
+  const parentRef = scrollContainerRef || internalRef;
   const [selectedRange, setSelectedRange] = useState<{ start: number; end: number } | null>(null);
   const isDragging = useRef(false);
   const dragStart = useRef<number | null>(null);
@@ -226,7 +230,9 @@ export function MemoryViewer({ highlightRanges = [], onSelectionChange }: Memory
 
   return (
     <>
-      <Card className="h-full flex flex-col">
+      <Card data-panel-id="memory" className={`h-full flex flex-col transition-all ${
+        isActive ? "ring-2 ring-primary ring-offset-1 ring-offset-background" : ""
+      }`}>
         <CardHeader className="py-1 px-3 flex-shrink-0 bg-muted/50 border-b">
           <div className="flex items-center justify-between">
             <CardTitle className="text-xs">Memory ({totalBytes} bytes)</CardTitle>

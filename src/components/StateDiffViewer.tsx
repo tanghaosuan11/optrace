@@ -22,7 +22,7 @@ export function StateDiffViewer() {
       <div ref={parentRef} className="flex-1 overflow-auto text-[11px] scrollbar-hidden">
         {diffs.length === 0 ? (
           <div className="p-4 text-center text-muted-foreground">
-            暂无状态变更
+            No state changes recorded
           </div>
         ) : (
           <div

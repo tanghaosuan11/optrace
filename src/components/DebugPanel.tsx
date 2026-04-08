@@ -7,7 +7,7 @@ import { StorageViewer } from "./StorageViewer";
 import { LogViewer } from "./LogViewer";
 import { SourceViewer } from "./SourceViewer";
 import { ReturnDataViewer } from "./ReturnDataViewer";
-// import { StateDiffViewer } from "./StateDiffViewer";
+import { StateChangeViewer } from "./StateChangeViewer";
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ui/resizable";
 import { usePanelRef, Separator } from "react-resizable-panels";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -59,6 +59,12 @@ interface DebugPanelProps {
   onSeekTo?: (index: number) => void;
   onBack?: () => void;
   canGoBack?: boolean;
+  scrollContainerRefs?: {
+    opcode: React.RefObject<HTMLDivElement | null>;
+    stack: React.RefObject<HTMLDivElement | null>;
+    memory: React.RefObject<HTMLDivElement | null>;
+    storage: React.RefObject<HTMLDivElement | null>;
+  };
 }
 
 export function DebugPanel({
@@ -70,6 +76,7 @@ export function DebugPanel({
   onSeekTo,
   onBack,
   canGoBack = false,
+  scrollContainerRefs,
 }: DebugPanelProps) {
   // 从 store 读取调试数据
   const opcodes = useDebugStore((s) => s.opcodes);
@@ -83,6 +90,8 @@ export function DebugPanel({
   const [calldataView, setCalldataView] = useState<"parse" | "origin">("parse");
   const [isLookingUp, setIsLookingUp] = useState(false);
   const [onlineFn, setOnlineFn] = useState<string | null>(null);
+  const [onlineOutputSig, setOnlineOutputSig] = useState<string | null>(null);
+  const [outputLookupSelector, setOutputLookupSelector] = useState<string | null>(null);
 
   // 从 activeFrameId 找到当前 frame 取 frame info
   const txBoundaries = useDebugStore((s) => s.txBoundaries);
@@ -114,6 +123,10 @@ export function DebugPanel({
   useEffect(() => {
     setOnlineFn(null);
   }, [currentFrameMeta?.input]);
+  useEffect(() => {
+    setOnlineOutputSig(null);
+    setOutputLookupSelector(null);
+  }, [currentFrameMeta?.exitOutput]);
 
   async function handleOnlineLookup() {
     const raw = currentFrameMeta?.input ?? '';
@@ -153,6 +166,39 @@ export function DebugPanel({
     }
     return { fn, decoded, words };
   }, [currentFrameMeta?.input, onlineFn]);
+
+  const outputParsed = useMemo(() => {
+    const raw = currentFrameMeta?.exitOutput ?? "";
+    const hex = raw.startsWith("0x") ? raw : `0x${raw}`;
+    if (hex === "0x" || hex.length < 10) return null;
+    const selector = hex.slice(0, 10).toLowerCase();
+    const fn = getFnLocal(selector) ?? onlineOutputSig;
+    if (!fn) return null;
+    const decoded = decodeCalldataEntry(fn, hex);
+    return { fn, decoded };
+  }, [currentFrameMeta?.exitOutput, onlineOutputSig]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const raw = currentFrameMeta?.exitOutput ?? "";
+    const hex = raw.startsWith("0x") ? raw : `0x${raw}`;
+    if (!/^0x[0-9a-fA-F]{8}/.test(hex)) return;
+    const selector = hex.slice(0, 10).toLowerCase();
+    if (getFnLocal(selector)) return;
+    if (outputLookupSelector === selector) return;
+    setOutputLookupSelector(selector);
+    void (async () => {
+      try {
+        const { fn } = await lookupSignature4Byte(selector);
+        if (!cancelled && fn) setOnlineOutputSig(fn);
+      } catch {
+        // ignore lookup failure; keep raw output display
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentFrameMeta?.exitOutput, outputLookupSelector]);
 
   // 根据当前 opcode 计算栈参数名列表，将 "..." 展开为正确位置的空字符串
   const stackLabels = useMemo(() => {
@@ -226,7 +272,11 @@ export function DebugPanel({
           />
         </div> */}
         <div className="h-full min-h-0 overflow-hidden">
-          <OpcodeViewer onStackFieldsToggle={setShowStackFields} onToggleBreakpoint={onToggleBreakpoint} />
+          <OpcodeViewer 
+            onStackFieldsToggle={setShowStackFields} 
+            onToggleBreakpoint={onToggleBreakpoint} 
+            scrollContainerRef={scrollContainerRefs?.opcode}
+          />
         </div>
       </ResizablePanel>
 
@@ -238,7 +288,13 @@ export function DebugPanel({
           {/* Stack */}
           <ResizablePanel defaultSize={27} minSize={10} className="overflow-hidden">
             <div className="h-full">
-              <StackViewer stackLabels={stackLabels} stackMemoryAccess={stackMemoryAccess} onMemoryHighlight={setMemoryHighlight} onSeekTo={onSeekTo} />
+              <StackViewer 
+                stackLabels={stackLabels} 
+                stackMemoryAccess={stackMemoryAccess} 
+                onMemoryHighlight={setMemoryHighlight} 
+                onSeekTo={onSeekTo} 
+                scrollContainerRef={scrollContainerRefs?.stack}
+              />
             </div>
           </ResizablePanel>
 
@@ -247,7 +303,10 @@ export function DebugPanel({
           {/* Memory */}
           <ResizablePanel defaultSize={30} minSize={10} className="overflow-hidden">
             <div className="h-full">
-              <MemoryViewer highlightRanges={memoryHighlight ? [{ start: memoryHighlight.start, end: memoryHighlight.end, className: "bg-orange-400/50 rounded-sm" }] : []} />
+              <MemoryViewer 
+                highlightRanges={memoryHighlight ? [{ start: memoryHighlight.start, end: memoryHighlight.end, className: "bg-orange-400/50 rounded-sm" }] : []} 
+                scrollContainerRef={scrollContainerRefs?.memory}
+              />
             </div>
           </ResizablePanel>
 
@@ -256,7 +315,7 @@ export function DebugPanel({
           {/* Storage */}
           <ResizablePanel defaultSize={43} minSize={10} className="overflow-hidden">
             <div className="h-full">
-              <StorageViewer />
+              <StorageViewer scrollContainerRef={scrollContainerRefs?.storage} />
             </div>
           </ResizablePanel>
         </ResizablePanelGroup>
@@ -285,7 +344,9 @@ export function DebugPanel({
         onResize={(size) => setRightCollapsed(size.asPercentage <= 2)}
         className="flex flex-col min-h-0 overflow-hidden"
       >
-        <Tabs defaultValue="frame" className="flex flex-col min-h-0 h-full">
+        <ResizablePanelGroup orientation="vertical" className="h-full min-h-0">
+          <ResizablePanel defaultSize={50} minSize={20} className="min-h-0 overflow-hidden flex flex-col">
+        <Tabs defaultValue="frame" className="flex flex-col min-h-0 h-full flex-1">
           <div className="flex items-center flex-shrink-0 gap-1 mb-1">
             <TabsList className="h-7 flex-1 justify-center bg-transparent p-0 gap-0.5">
               <TabsTrigger value="frame" className="text-xs px-2 py-0.5">Frame</TabsTrigger>
@@ -294,18 +355,26 @@ export function DebugPanel({
             </TabsList>
           </div>
 
-          <TabsContent value="events" className="flex-1 min-h-0 overflow-hidden">
-            <div className="h-full overflow-hidden"><LogViewer /></div>
+          <TabsContent value="events" className="flex-1 min-h-0 overflow-hidden mt-0">
+            <ResizablePanelGroup orientation="vertical" className="h-full">
+              <ResizablePanel defaultSize={60} minSize={20} className="min-h-0 overflow-hidden">
+                <div className="h-full overflow-hidden" data-panel-id="logs"><LogViewer /></div>
+              </ResizablePanel>
+              <ResizableHandle />
+              <ResizablePanel defaultSize={40} minSize={15} className="min-h-0 overflow-hidden">
+                <StateChangeViewer />
+              </ResizablePanel>
+            </ResizablePanelGroup>
           </TabsContent>
 
-          <TabsContent value="source" className="flex-1 min-h-0 overflow-hidden">
+          <TabsContent value="source" className="flex-1 min-h-0 overflow-hidden mt-0">
             <div className="h-full min-h-0 overflow-hidden"><SourceViewer /></div>
           </TabsContent>
 
-          <TabsContent value="frame" className="flex-1 min-h-0 overflow-hidden">
+          <TabsContent value="frame" className="flex-1 min-h-0 overflow-hidden mt-0">
             <ResizablePanelGroup orientation="vertical" className="h-full">
             <ResizablePanel defaultSize={33} minSize={10} className="overflow-hidden">
-              <Card className="h-full flex flex-col">
+              <Card data-panel-id="frameinfo" className="h-full flex flex-col">
                 <CardHeader className="py-1 px-3 flex-shrink-0 bg-muted/50 border-b">
                   <div className="flex items-center justify-between gap-1.5">
                     <div className="flex items-center gap-1.5">
@@ -357,7 +426,7 @@ export function DebugPanel({
                               {i > 0 && <span className="text-muted-foreground/50">›</span>}
                               {isCurrent
                                 ? <span className="">{label}</span>
-                                : <span className="text-blue-400 hover:text-blue-300 cursor-pointer transition-colors" onClick={() => onSelectFrame(f.id)}>{label}</span>
+                                : <span data-hint className="text-blue-400 hover:text-blue-300 cursor-pointer transition-colors" onClick={() => onSelectFrame(f.id)}>{label}</span>
                               }
                             </span>
                           );
@@ -396,41 +465,58 @@ export function DebugPanel({
                         <span className="truncate text-foreground font-mono">
                           {`0x${currentFrameMeta.exitCode!.toString(16).toUpperCase()} (${EXIT_CODE_NAMES[currentFrameMeta.exitCode!] ?? currentFrameMeta.exitCode})`}
                         </span>
+                        <span className="text-muted-foreground">Steps</span>
+                        <span className="text-foreground flex items-center gap-1">
+                          {currentFrameMeta?.startStep != null ? <>{currentFrameMeta.startStep + 1}<ChevronsRight className="w-2.5 h-2.5 text-muted-foreground hover:text-foreground cursor-pointer transition-colors" onClick={() => onSeekTo?.(currentFrameMeta.startStep!)} /></> : '—'}
+                          <span className="text-muted-foreground">–</span>
+                          {currentFrameMeta?.endStep != null ? <>{currentFrameMeta.endStep + 1}<ChevronsRight className="w-2.5 h-2.5 text-muted-foreground hover:text-foreground cursor-pointer transition-colors" onClick={() => onSeekTo?.(currentFrameMeta.endStep!)} /></> : '—'}
+                        </span>
                         {!currentFrameMeta.success && (
                           <>
                             <span className="text-muted-foreground">Output</span>
-                            <span className="truncate text-red-400 font-mono" title={currentFrameMeta.exitOutput ?? ''}>
+                            <div className="min-w-0 text-red-400 font-mono">
                               {(() => {
-                                const hex = currentFrameMeta.exitOutput ?? '0x';
-                                if (hex === '0x' || hex === '') return '(no output)';
+                                const raw = currentFrameMeta.exitOutput ?? "0x";
+                                const hex = raw.startsWith("0x") ? raw : `0x${raw}`;
+                                if (hex === "0x" || hex === "") return <div>(no output)</div>;
                                 // Error(string) selector = 0x08c379a0
-                                if (hex.startsWith('0x08c379a0') && hex.length >= 138) {
+                                if (hex.startsWith("0x08c379a0") && hex.length >= 138) {
                                   try {
                                     const offset = parseInt(hex.slice(10, 74), 16);
                                     const len = parseInt(hex.slice(10 + offset * 2, 10 + offset * 2 + 64), 16);
                                     const strHex = hex.slice(10 + offset * 2 + 64, 10 + offset * 2 + 64 + len * 2);
                                     const bytes = new Uint8Array(strHex.match(/.{2}/g)!.map(b => parseInt(b, 16)));
-                                    return new TextDecoder().decode(bytes);
+                                    return <div className="whitespace-pre-wrap break-all">{new TextDecoder().decode(bytes)}</div>;
                                   } catch { /* fall through */ }
                                 }
                                 // Panic(uint256) selector = 0x4e487b71
-                                if (hex.startsWith('0x4e487b71') && hex.length >= 74) {
+                                if (hex.startsWith("0x4e487b71") && hex.length >= 74) {
                                   const code = parseInt(hex.slice(10, 74), 16);
-                                  return `Panic(0x${code.toString(16).padStart(2, '0')})`;
+                                  return <div className="whitespace-pre-wrap break-all">{`Panic(0x${code.toString(16).padStart(2, "0")})`}</div>;
                                 }
-                                return hex.length > 66 ? hex.slice(0, 66) + '…' : hex;
+                                return (
+                                  <div className="space-y-1">
+                                    {outputParsed?.fn ? (
+                                      <div className="text-[10px] text-muted-foreground truncate">{outputParsed.fn}</div>
+                                    ) : null}
+                                    {outputParsed?.decoded && outputParsed.decoded.length > 0 ? (
+                                      <div className="text-[10px] text-muted-foreground space-y-0.5">
+                                        {outputParsed.decoded.map((arg, idx) => (
+                                          <div key={`${arg.type}-${idx}`} className="whitespace-pre-wrap break-all">
+                                            {`arg${idx} (${arg.type}): ${arg.value}`}
+                                          </div>
+                                        ))}
+                                      </div>
+                                    ) : null}
+                                    <div className="whitespace-pre-wrap break-all">{hex}</div>
+                                  </div>
+                                );
                               })()}
-                            </span>
+                            </div>
                           </>
                         )}
                       </>
                     )}
-                    <span className="text-muted-foreground">Steps</span>
-                    <span className="text-foreground flex items-center gap-1">
-                      {currentFrameMeta?.startStep != null ? <>{currentFrameMeta.startStep + 1}<ChevronsRight className="w-2.5 h-2.5 text-muted-foreground hover:text-foreground cursor-pointer transition-colors" onClick={() => onSeekTo?.(currentFrameMeta.startStep!)} /></> : '—'}
-                      <span className="text-muted-foreground">–</span>
-                      {currentFrameMeta?.endStep != null ? <>{currentFrameMeta.endStep + 1}<ChevronsRight className="w-2.5 h-2.5 text-muted-foreground hover:text-foreground cursor-pointer transition-colors" onClick={() => onSeekTo?.(currentFrameMeta.endStep!)} /></> : '—'}
-                    </span>
                   </div>
                     );
                   })()}
@@ -439,11 +525,11 @@ export function DebugPanel({
             </ResizablePanel>
             <ResizableHandle />
             <ResizablePanel defaultSize={33} minSize={10} className="overflow-hidden">
-              <div className="h-full"><ReturnDataViewer /></div>
+              <div className="h-full" data-panel-id="returndata"><ReturnDataViewer /></div>
             </ResizablePanel>
             <ResizableHandle />
             <ResizablePanel defaultSize={34} minSize={10} className="overflow-hidden">
-              <Card className="h-full flex flex-col">
+              <Card data-panel-id="calldata" className="h-full flex flex-col">
                 <CardHeader className="py-1 px-3 flex-shrink-0 bg-muted/50 border-b">
                   <div className="flex items-center justify-between">
                     <CardTitle className="text-xs">Calldata</CardTitle>
@@ -507,6 +593,8 @@ export function DebugPanel({
             </ResizablePanelGroup>
           </TabsContent>
         </Tabs>
+          </ResizablePanel>
+        </ResizablePanelGroup>
       </ResizablePanel>
     </ResizablePanelGroup>
   );

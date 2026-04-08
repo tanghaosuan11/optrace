@@ -11,6 +11,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ChevronRight, HelpCircle, FolderOpen, Info, Plus, Trash2 } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { MultiTxListEditor } from "@/components/MultiTxListEditor";
 import { TxInfo } from "@/components/TxInfo";
 import {
@@ -45,6 +46,24 @@ export function MainInterface({
   onSelectFrame,
   onNavigateTo,
 }: MainInterfaceProps) {
+  const HARDFORK_OPTIONS = [
+    "auto",
+    "frontier",
+    "homestead",
+    "tangerine",
+    "spurious_dragon",
+    "byzantium",
+    "petersburg",
+    "istanbul",
+    "muir_glacier",
+    "berlin",
+    "london",
+    "arrow_glacier",
+    "gray_glacier",
+    "merge",
+    "shanghai",
+    "cancun",
+  ] as const;
   const tx = useDebugStore((s) => s.tx);
   const txData = useDebugStore((s) => s.txData);
   const blockData = useDebugStore((s) => s.blockData);
@@ -486,6 +505,37 @@ export function MainInterface({
                     </Button>
                   </div>
                   <div className="grid grid-cols-2 gap-x-4 gap-y-2">
+                    <div className="col-span-2 flex items-center gap-2 text-xs">
+                      <span className={`${locked ? "opacity-50" : ""}`}>Hardfork</span>
+                      <Select
+                        value={config.hardfork || "auto"}
+                        onValueChange={(v) => updateConfig({ hardfork: v })}
+                        disabled={locked}
+                      >
+                        <SelectTrigger className="h-7 w-[180px] text-xs font-mono">
+                          <SelectValue placeholder="auto" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {HARDFORK_OPTIONS.map((hf) => (
+                            <SelectItem key={hf} value={hf} className="text-xs font-mono">
+                              {hf}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <TooltipProvider delayDuration={0}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span className="flex-shrink-0 cursor-default">
+                              <HelpCircle className="h-3 w-3 text-muted-foreground" />
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent side="top" className="max-w-[300px] text-xs">
+                            Force a specific hardfork rule set for testing. Use <span className="font-mono">auto</span> to select by chain and block.
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    </div>
                     <label className={`flex items-center gap-1.5 text-xs ${locked ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}>
                       <Checkbox
                         checked={config.useAlloyCache}
@@ -506,7 +556,7 @@ export function MainInterface({
                         }}
                       />
                       <span>Prestate</span>
-                      <TooltipProvider delayDuration={0}><Tooltip><TooltipTrigger asChild><span className="flex-shrink-0 cursor-default"><HelpCircle className="h-3 w-3 text-muted-foreground" /></span></TooltipTrigger><TooltipContent side="top" className="max-w-[260px] text-xs">Pre-fill state via debug_traceTransaction prestateTracer for accurate mid-block replay. Requires the node to support the debug namespace.</TooltipContent></Tooltip></TooltipProvider>
+                      <TooltipProvider delayDuration={0}><Tooltip><TooltipTrigger asChild><span className="flex-shrink-0 cursor-default"><HelpCircle className="h-3 w-3 text-muted-foreground" /></span></TooltipTrigger><TooltipContent side="top" className="max-w-[280px] text-xs"><div className="space-y-1"><div>Pre-fill state via <span className="font-mono">debug_traceTransaction</span> prestateTracer for accurate mid-block replay.</div><div className="text-red-400">Requires RPC debug API support. Free-tier RPC plans often do not provide this endpoint.</div></div></TooltipContent></Tooltip></TooltipProvider>
                     </label>
                     <label className={`flex items-center gap-1.5 text-xs ${locked ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}>
                       <Checkbox

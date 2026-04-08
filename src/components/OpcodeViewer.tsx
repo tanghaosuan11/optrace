@@ -17,6 +17,7 @@ import {
 interface OpcodeViewerProps {
   onStackFieldsToggle?: (on: boolean) => void;
   onToggleBreakpoint?: (pc: number) => void;
+  scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
 }
 
 const ROW_HEIGHT = 20;
@@ -50,7 +51,7 @@ const OPCODE_FILTER_OPTIONS: { label: string; names: string[] }[] = [
   { label: "JUMPDEST",     names: ["JUMPDEST"] },
 ];
 
-export function OpcodeViewer({ onStackFieldsToggle, onToggleBreakpoint }: OpcodeViewerProps) {
+export function OpcodeViewer({ onStackFieldsToggle, onToggleBreakpoint, scrollContainerRef }: OpcodeViewerProps) {
   const { openBookmarks } = useDrawerActions();
   const opcodes = useDebugStore((s) => s.opcodes);
   const currentPc = useDebugStore((s) => s.currentPc);
@@ -59,6 +60,8 @@ export function OpcodeViewer({ onStackFieldsToggle, onToggleBreakpoint }: Opcode
   const breakpointPcs = useDebugStore((s) => s.breakpointPcs);
   const breakpointLabels = useDebugStore((s) => s.breakpointLabels);
   const backwardSliceHighlight = useDebugStore((s) => s.backwardSliceHighlight);
+  const activePanelId = useDebugStore((s) => s.activePanelId);
+  const isActive = activePanelId === "opcode";
   const [searchPc, setSearchPc] = useState("");
   const [highlightedIndex, setHighlightedIndex] = useState<number | null>(null);
   const [hoveredData, setHoveredData] = useState<{ data: string; x: number; y: number } | null>(null);
@@ -67,7 +70,8 @@ export function OpcodeViewer({ onStackFieldsToggle, onToggleBreakpoint }: Opcode
   const [hiddenOpcodes, setHiddenOpcodes] = useState<Set<string>>(new Set());
   const [executedOnly, setExecutedOnly] = useState(false);
   const executedOpcodeSet = useDebugStore((s) => s.executedOpcodeSet);
-  const parentRef = useRef<HTMLDivElement>(null);
+  const internalRef = useRef<HTMLDivElement>(null);
+  const parentRef = scrollContainerRef || internalRef;
 
   // 每个过滤选项在当前 bytecode 中的出现次数及是否被执行过
   const opcodeStatsByGroup = useMemo(() => {
@@ -191,7 +195,9 @@ export function OpcodeViewer({ onStackFieldsToggle, onToggleBreakpoint }: Opcode
   };
 
   return (
-    <Card className="h-full flex flex-col">
+    <Card data-panel-id="opcode" className={`h-full flex flex-col transition-all ${
+      isActive ? "ring-2 ring-primary ring-offset-1 ring-offset-background" : ""
+    }`}>
       <CardHeader className="py-1 px-3 flex-shrink-0 bg-muted/50 border-b">
         <CardTitle className="flex items-center justify-between text-xs">
           <div className="flex items-center gap-1">

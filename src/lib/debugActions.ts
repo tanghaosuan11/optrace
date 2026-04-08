@@ -1,4 +1,5 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
+import { createPublicClient, http } from "viem";
 import { useDebugStore } from "@/store/debugStore";
 import { useForkStore } from "@/store/forkStore";
 import { fetchTxInfo } from "./txFetcher";
@@ -173,6 +174,39 @@ export interface StartDebugDeps extends MessageHandlerContext {
   setIsPlaying: (v: boolean) => void;
 }
 
+type PrestateSupportStatus = "supported" | "unsupported" | "rpc_error";
+
+function errorToText(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
+
+async function checkPrestateRpcSupport(rpcUrl: string, txHash: string): Promise<PrestateSupportStatus> {
+  const client = createPublicClient({ transport: http(rpcUrl) });
+  try {
+    await (client as unknown as { request: (args: { method: string; params?: unknown[] }) => Promise<unknown> }).request({
+      method: "debug_traceTransaction",
+      params: [txHash, { tracer: "prestateTracer" }],
+    });
+    return "supported";
+  } catch (e) {
+    const msg = errorToText(e);
+    // Common provider responses:
+    // -32601 method not found
+    // -32600 not available on free tier
+    const unsupported =
+      /debug_traceTransaction/i.test(msg) &&
+      /(not available|method not found|unsupported|debug namespace|free tier|upgrade)/i.test(msg);
+    if (unsupported) return "unsupported";
+    // 429/timeout/network failures should not be treated as "unsupported".
+    return "rpc_error";
+  }
+}
+
 export async function startDebugAction(deps: StartDebugDeps) {
   const { tx, txData, blockData, txDataList, txSlots, debugByTx, sync } =
     useDebugStore.getState();
@@ -313,6 +347,23 @@ export async function startDebugAction(deps: StartDebugDeps) {
         }))
       : null;
 
+    if (backendConfig.usePrestate && !isHandFill) {
+      const txWithPrefix = txForInvoke.startsWith("0x") ? txForInvoke : `0x${txForInvoke}`;
+      const prestateSupport = await checkPrestateRpcSupport(backendConfig.rpcUrl, txWithPrefix);
+      if (prestateSupport === "unsupported") {
+        toast.error(
+          "Prestate requires RPC support for debug_traceTransaction (debug API). Switch RPC provider or disable Prestate.",
+        );
+        deps.setIsDebugging(false);
+        return;
+      }
+      if (prestateSupport === "rpc_error") {
+        toast.warning(
+          "Prestate support check failed due to RPC/network issue (e.g. 429/timeout). Will continue and let backend try.",
+        );
+      }
+    }
+
     if (multiPayload.length >= 2) {
       await invoke("op_trace", {
         tx: txForInvoke,
@@ -382,6 +433,8 @@ export async function startDebugAction(deps: StartDebugDeps) {
   } catch (error) {
     console.log("准备调试数据:", { txHash, txData, blockData });
     console.error("调试失败:", error);
+    const msg = error instanceof Error ? error.message : String(error);
+    toast.error(msg || "Debug failed");
     deps.setIsDebugging(false);
   } finally {
     deps.runtime.startDebugInFlight = false;
@@ -406,7 +459,7 @@ export async function resetAllAction(deps: ResetAllDeps) {
     console.warn("[reset] reset_session failed:", e);
   });
 
-  const { config, txSlots, txDataList, debugByTx } = useDebugStore.getState();
+  const { config, txSlots, txDataList, debugByTx, breakOpcodes } = useDebugStore.getState();
 
   const clearedSlots = txSlots.map((s) => ({
     ...s,
@@ -420,6 +473,7 @@ export async function resetAllAction(deps: ResetAllDeps) {
 
   useDebugStore.getState().sync({
     config,
+    breakOpcodes,
     sessionId: deps.sessionId,
     txSlots: clearedSlots,
     txDataList,

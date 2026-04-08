@@ -11,10 +11,12 @@
 pub mod expr;
 pub mod engine;
 pub mod solver;
+pub mod slicer;
 
 pub use engine::replay_from_trace;
-pub use solver::{SolverResult, SymGoal, build_smt2_query, run_z3};
+pub use solver::{SolverResult, SymGoal, build_smt2_query, run_z3, SolveExplain, explain_solve};
 pub use solver::PathConstraint;
+pub use slicer::{SymSource, slice_for_jumpi};
 
 use serde::{Deserialize, Serialize};
 
@@ -56,6 +58,11 @@ pub struct SymConfig {
     /// 是否将 NUMBER（block.number）视为符号
     #[serde(default)]
     pub block_number_sym: bool,
+
+    /// 初始存储状态中被视为符号的 slot（仅用于尚未被 SSTORE 的 SLOAD）
+    /// 每项 `(slot_hex64, name)`
+    #[serde(default)]
+    pub storage_symbols: Vec<(String, String)>,
 }
 
 impl Default for SymConfig {
@@ -67,6 +74,7 @@ impl Default for SymConfig {
             origin_sym: false,
             timestamp_sym: false,
             block_number_sym: false,
+            storage_symbols: Vec::new(),
         }
     }
 }

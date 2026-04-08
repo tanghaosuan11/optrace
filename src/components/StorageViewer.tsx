@@ -4,6 +4,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { useDebugStore } from "@/store/debugStore";
 import { getContractSlots, solTypeToString, type SlotInfo } from "@/lib/contractSlots";
 import type { StorageChangeEntry } from "@/lib/types";
+import { frameScopeKey, frameScopeKeyFromFrame } from "@/lib/frameScope";
 import {
   PanelContextMenu, PanelContextMenuContent, PanelContextMenuItem,
   PanelContextMenuTrigger,
@@ -22,6 +23,8 @@ interface StorageSlot {
   isRead: boolean;
   presentValue: string;
   history: StorageChangeEntry[];
+  /** 该 slot 的最后写入帧是否处于 revert 链上 */
+  isReverted: boolean;
 }
 
 type VirtualRow =
@@ -33,14 +36,22 @@ const HEADER_HEIGHT = 22;
 const SMALL_THRESHOLD = 1n << 64n;
 function isSmallKey(key: string) { try { return BigInt(key) < SMALL_THRESHOLD; } catch { return false; } }
 
-export function StorageViewer() {
+interface StorageViewerProps {
+  scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
+}
+
+export function StorageViewer({ scrollContainerRef }: StorageViewerProps = {}) {
   const storageChanges = useDebugStore((s) => s.storageChanges);
+  const callFrames = useDebugStore((s) => s.callFrames);
+  const activePanelId = useDebugStore((s) => s.activePanelId);
+  const isActive = activePanelId === "storage";
   const txBoundaries = useDebugStore((s) => s.txBoundaries);
   const currentStepIndex = useDebugStore((s) => s.currentStepIndex);
   const callType = useDebugStore((s) => s.callType);
   const callerAddress = useDebugStore((s) => s.callerAddress);
   const currentDebugChainId = useDebugStore((s) => s.currentDebugChainId);
-  const parentRef = useRef<HTMLDivElement>(null);
+  const internalRef = useRef<HTMLDivElement>(null);
+  const parentRef = scrollContainerRef ?? internalRef;
   const [tab, setTab] = useState<"storage" | "tstorage">("storage");
   // address(lowercase) -> slotHex(lowercase) -> SlotInfo
   const [annotationsMap, setAnnotationsMap] = useState<Map<string, Map<string, SlotInfo>>>(new Map());
@@ -50,9 +61,33 @@ export function StorageViewer() {
 
   const showTxOnStorage = Boolean(txBoundaries && txBoundaries.length > 0);
 
+  // 计算处于 revert 链上的帧 scope 集合（与 buildCallTree 逻辑相同）
+  const revertedScopes = useMemo(() => {
+    const failedScopes = new Set(
+      callFrames.filter(f => f.success === false).map(f => frameScopeKeyFromFrame(f))
+    );
+    const result = new Set<string>();
+    for (const frame of callFrames) {
+      const myScope = frameScopeKeyFromFrame(frame);
+      const tid = frame.transactionId ?? 0;
+      let cur: typeof callFrames[number] | undefined = frame;
+      while (cur) {
+        if (failedScopes.has(frameScopeKeyFromFrame(cur))) {
+          result.add(myScope);
+          break;
+        }
+        cur = cur.parentId != null
+          ? callFrames.find(f => (f.transactionId ?? 0) === tid && f.contextId === cur!.parentId)
+          : undefined;
+      }
+    }
+    return result;
+  }, [callFrames]);
+
   const visibleChanges = useMemo(
     () => storageChanges.filter(e =>
-      e.stepIndex <= currentStepIndex && e.storageType === tab
+      // backend event stepIndex is 1-based; currentStepIndex is 0-based
+      e.stepIndex <= (currentStepIndex + 1) && e.storageType === tab
     ),
     [storageChanges, currentStepIndex, tab]
   );
@@ -64,11 +99,13 @@ export function StorageViewer() {
       if (!addrMap.has(entry.address)) addrMap.set(entry.address, new Map());
       const slotMap = addrMap.get(entry.address)!;
       const slotKey = `${entry.storageType}|${entry.key}`;
+      const entryReverted = revertedScopes.has(frameScopeKey(entry.transactionId ?? 0, entry.contextId));
       const existing = slotMap.get(slotKey);
       if (existing) {
         existing.presentValue = entry.newValue;
         if (!entry.isRead) {
           existing.isRead = false;
+          existing.isReverted = entryReverted;
           existing.history.push(entry);
         }
       } else {
@@ -79,11 +116,12 @@ export function StorageViewer() {
           isRead: entry.isRead,
           presentValue: entry.newValue,
           history: entry.isRead ? [] : [entry],
+          isReverted: entryReverted,
         });
       }
     }
     return addrMap;
-  }, [visibleChanges]);
+  }, [visibleChanges, revertedScopes]);
 
   const flatRows = useMemo<VirtualRow[]>(() => {
     const rows: VirtualRow[] = [];
@@ -159,7 +197,9 @@ export function StorageViewer() {
 
   return (
     <>
-    <Card className="h-full flex flex-col">
+    <Card data-panel-id="storage" className={`h-full flex flex-col transition-all ${
+      isActive ? "ring-2 ring-primary ring-offset-1 ring-offset-background" : ""
+    }`}>
       <div className="py-1 px-3 flex-shrink-0 bg-muted/50 border-b">
         <div className="flex items-center justify-between">
           <span className="text-xs font-semibold">Storage ({totalSlots})</span>
@@ -214,35 +254,37 @@ export function StorageViewer() {
                   ?.get(slot.key.toLowerCase());
                 const small = isSmallKey(slot.key);
                 const trimmedKey = (() => { try { return `0x${BigInt(slot.key).toString(16)}`; } catch { return slot.key; } })();
+                const strikeRevertedWrite = slot.isReverted && !slot.isRead;
                 return (
                   <PanelContextMenu key={vRow.key}>
                     <PanelContextMenuTrigger asChild>
                   <div
                     style={{ position: "absolute", top: 0, left: 0, width: "100%", height: `${vRow.size}px`, transform: `translateY(${vRow.start}px)` }}
                     className={`flex flex-col justify-center pl-3 pr-6 text-[11px] font-mono border-b ${
-                      vRow.index % 2 === 0 ? "bg-muted/30" : ""
+                      slot.isReverted ? "opacity-50" : vRow.index % 2 === 0 ? "bg-muted/30" : ""
                     }`}
+                    title={slot.isReverted ? "此帧已被 revert，写操作无效" : undefined}
                   >
                     {/* 第一行: key + type + 第三栏 */}
                     <div className="flex items-center leading-tight w-full overflow-hidden">
                       {annotation ? (
                         <>
-                          <span className="w-[10%] shrink-0 truncate text-muted-foreground" title={slot.key}>
+                          <span className={`w-[10%] shrink-0 truncate text-muted-foreground ${strikeRevertedWrite ? "line-through" : ""}`} title={slot.key}>
                             {small ? trimmedKey : slot.key.slice(0, 10) + "…"}
                           </span>
-                          <span className="w-[50%] shrink-0 truncate text-muted-foreground" title={`${annotation.name ?? ""}: ${solTypeToString(annotation.type)}`}>
+                          <span className={`w-[50%] shrink-0 truncate text-muted-foreground ${strikeRevertedWrite ? "line-through" : ""}`} title={`${annotation.name ?? ""}: ${solTypeToString(annotation.type)}`}>
                             {annotation.name ? `${annotation.name} ${solTypeToString(annotation.type)}` : solTypeToString(annotation.type)}
                           </span>
                           <span className="w-[40%] shrink-0 truncate text-muted-foreground" />
                         </>
                       ) : (
-                        <span className="flex-1 truncate text-muted-foreground" title={slot.key}>
+                        <span className={`flex-1 truncate text-muted-foreground ${strikeRevertedWrite ? "line-through" : ""}`} title={slot.key}>
                           {small ? trimmedKey : slot.key}
                         </span>
                       )}
                     </div>
                     {/* 第二行: value */}
-                    <div className="pl-6 leading-tight truncate text-muted-foreground text-center" title={slot.presentValue}>
+                    <div className={`pl-6 leading-tight truncate text-muted-foreground text-center ${strikeRevertedWrite ? "line-through" : ""}`} title={slot.presentValue}>
                       {slot.presentValue}
                     </div>
                     {/* 右侧标记：read-only 显示 R，有写入历史显示 ⊞ */}
@@ -274,9 +316,9 @@ export function StorageViewer() {
                                   </span>
                                 )}
                                 <span className="text-amber-500 shrink-0">#{h.stepIndex}</span>
-                                <span className="text-muted-foreground shrink-0">{h.hadValue}</span>
-                                <span className="text-muted-foreground shrink-0">→</span>
-                                <span className="text-muted-foreground shrink-0">{h.newValue}</span>
+                                <span className={revertedScopes.has(frameScopeKey(h.transactionId ?? 0, h.contextId)) ? "text-muted-foreground/40 line-through shrink-0" : "text-muted-foreground shrink-0"}>{h.hadValue}</span>
+                                <span className={revertedScopes.has(frameScopeKey(h.transactionId ?? 0, h.contextId)) ? "text-muted-foreground/40 shrink-0" : "text-muted-foreground shrink-0"}>→</span>
+                                <span className={revertedScopes.has(frameScopeKey(h.transactionId ?? 0, h.contextId)) ? "text-orange-400/50 line-through shrink-0" : "text-muted-foreground shrink-0"}>{h.newValue}</span>
                               </div>
                             ))}
                           </div>

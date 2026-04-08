@@ -258,7 +258,11 @@ export const DataFlowTreeComponent: React.FC<DataFlowTreeProps> = ({
   return (
     <div className="w-full h-full bg-white flex flex-col">
       {/* 树形显示区域 - 水平滚动，紧凑间距（元信息在 DataFlowModal 顶栏单行） */}
-      <div ref={containerRef} className="flex-1 overflow-auto relative bg-gradient-to-br from-gray-50 to-white">
+      <div
+        ref={containerRef}
+        className="flex-1 overflow-auto relative bg-gradient-to-br from-gray-50 to-white"
+        data-keyboard-scroll-root="dataflow"
+      >
         {/* 内容层 - 紧凑布局 */}
         <div ref={contentRef} className="min-w-max p-2 relative" style={{ zIndex: 1 }}>
           <svg

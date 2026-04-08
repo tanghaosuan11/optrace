@@ -2,6 +2,7 @@ import { create, type UseBoundStore, type StoreApi } from "zustand";
 import { emptyTxListRow, emptyTxSlot, type TxData, type BlockData, type TxListRow, type TxSlot } from "@/lib/txFetcher";
 import type {
   StorageChangeEntry,
+  StateChangeEntry,
   CallFrame,
   CallTreeNode,
   LogEntry,
@@ -13,7 +14,7 @@ import type { ScanHit, CondNode } from "@/lib/pauseConditions";
 import { type AppConfig, DEFAULT_CONFIG } from "@/lib/appConfig";
 
 // Re-export for consumers that import from debugStore
-export type { Opcode, LogEntry, StateDiff, AddressBalance };
+export type { Opcode, LogEntry, StateDiff, AddressBalance, StateChangeEntry };
 
 // Slice 1: playback（当前帧 + 播放控制）
 
@@ -30,6 +31,7 @@ export interface PlaybackSlice {
   returnError: string;
   stateDiffs: StateDiff[];
   balanceChanges: AddressBalance[];
+  stateChanges: StateChangeEntry[];
   // 当前帧元数据
   callType?: "call" | "staticcall" | "delegatecall" | "create" | "create2";
   callerAddress?: string;
@@ -66,6 +68,7 @@ const initialPlayback: PlaybackSlice = {
   returnError: "",
   stateDiffs: [],
   balanceChanges: [],
+  stateChanges: [],
   callType: undefined,
   callerAddress: undefined,
   currentStepIndex: -1,
@@ -149,6 +152,39 @@ const initialNotes: NotesSlice = {
   stepMarks: [],
 };
 
+/** 与 W/E 滚动优先级一致：多抽屉同时打开时只滚一个 */
+export type KeyboardScrollScope =
+  | "main"
+  | "utilities"
+  | "logs"
+  | "analysis"
+  | "bookmarks"
+  | "condList"
+  | "callTree"
+  | "notes"
+  | "dataflow";
+
+export function pickKeyboardScrollScope(s: {
+  isCondListOpen: boolean;
+  isCallTreeOpen: boolean;
+  isUtilitiesOpen: boolean;
+  isLogDrawerOpen: boolean;
+  isAnalysisOpen: boolean;
+  isBookmarksOpen: boolean;
+  isNotesDrawerOpen: boolean;
+  isDataFlowModalOpen: boolean;
+}): KeyboardScrollScope {
+  if (s.isCondListOpen) return "condList";
+  if (s.isCallTreeOpen) return "callTree";
+  if (s.isUtilitiesOpen) return "utilities";
+  if (s.isLogDrawerOpen) return "logs";
+  if (s.isAnalysisOpen) return "analysis";
+  if (s.isBookmarksOpen) return "bookmarks";
+  if (s.isNotesDrawerOpen) return "notes";
+  if (s.isDataFlowModalOpen) return "dataflow";
+  return "main";
+}
+
 // Slice 3: UI（tab / 导航 / 面板）
 
 export interface UISlice {
@@ -196,6 +232,18 @@ export interface UISlice {
   isStepPlaybackBarVisible: boolean;
   /** 步数队列是否处于自动按间隔前进 */
   isStepPlaybackAutoPlaying: boolean;
+  /** Hint 模式：f 键进入，esc/选中后退出 */
+  isHintMode: boolean;
+  /** 面板选择器：Shift+F 打开，按数字选择后自动关闭 */
+  isPanelSelectorOpen: boolean;
+  /** ? 快捷键帮助弹窗 */
+  isKeyboardShortcutsHelpOpen: boolean;
+  /** Command Palette（Ctrl/Cmd+K） */
+  isCommandPaletteOpen: boolean;
+  /** Command Palette 打开时预填查询（如 ":" / ":f"） */
+  commandPalettePrefill: string;
+  /** 当前焦点面板 ID（用于 Tab 切换和 w/s 滚动控制） */
+  activePanelId: string;
 }
 
 const initialUI: UISlice = {
@@ -224,6 +272,12 @@ const initialUI: UISlice = {
   stepPlaybackCursor: 0,
   isStepPlaybackBarVisible: false,
   isStepPlaybackAutoPlaying: false,
+  isHintMode: false,
+  isPanelSelectorOpen: false,
+  isKeyboardShortcutsHelpOpen: false,
+  isCommandPaletteOpen: false,
+  commandPalettePrefill: "",
+  activePanelId: "opcode",
 };
 
 // Slice 3b: app config
@@ -274,6 +328,23 @@ const initialTx: TxSlice = {
 // Merged state + actions
 
 export type DebugState = PlaybackSlice & ConditionSlice & NotesSlice & UISlice & ConfigSlice & TxSlice;
+
+function applyActivePanelForScrollScope(
+  prev: DebugState,
+  next: DebugState,
+  partial: Partial<DebugState>,
+): DebugState {
+  const scopeNext = pickKeyboardScrollScope(next);
+  const scopePrev = pickKeyboardScrollScope(prev);
+  let activePanelId = next.activePanelId;
+  if (scopeNext !== "main") {
+    activePanelId = "";
+  } else if (scopePrev !== "main") {
+    activePanelId =
+      partial.activePanelId !== undefined ? next.activePanelId : "opcode";
+  }
+  return { ...next, activePanelId };
+}
 
 export interface DebugActions {
   /** 批量更新 store（桥接用） */
@@ -335,7 +406,11 @@ export type DebugStore = DebugState & DebugActions;
 export const useDebugStore: UseBoundStore<StoreApi<DebugStore>> = create<DebugStore>()((set) => ({
   ...initialState,
 
-  sync: (partial) => set(partial),
+  sync: (partial) =>
+    set((s) => {
+      const next = { ...s, ...partial } as DebugState;
+      return applyActivePanelForScrollScope(s, next, partial);
+    }),
 
   seekToStep: null,
 
@@ -379,12 +454,20 @@ export const useDebugStore: UseBoundStore<StoreApi<DebugStore>> = create<DebugSt
   setBackwardSliceHighlight: (steps) => set({ backwardSliceHighlight: new Set(steps) }),
   clearBackwardSliceHighlight: () => set({ backwardSliceHighlight: new Set<number>() }),
 
-  openDataFlowModal: (rootId, nodes) => set({
-    isDataFlowModalOpen: true,
-    dataFlowTreeRootId: rootId,
-    dataFlowTreeNodes: nodes,
-  }),
-  closeDataFlowModal: () => set({
-    isDataFlowModalOpen: false,
-  }),
+  openDataFlowModal: (rootId, nodes) =>
+    set((s) => {
+      const partial = {
+        isDataFlowModalOpen: true,
+        dataFlowTreeRootId: rootId,
+        dataFlowTreeNodes: nodes,
+      };
+      const next = { ...s, ...partial } as DebugState;
+      return applyActivePanelForScrollScope(s, next, partial);
+    }),
+  closeDataFlowModal: () =>
+    set((s) => {
+      const partial = { isDataFlowModalOpen: false };
+      const next = { ...s, ...partial } as DebugState;
+      return applyActivePanelForScrollScope(s, next, partial);
+    }),
 }));

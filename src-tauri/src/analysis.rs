@@ -374,6 +374,7 @@ fn register_query_fns(
                     "gasUsed":   f.gas_used,
                     "stepCount": f.step_count,
                     "success":   f.success,
+                    "revertedByParent": f.reverted_by_parent,
                 }).to_string(),
             }
         })?)?;
@@ -412,6 +413,74 @@ fn register_query_fns(
                     "oldValue":       u256_to_hex(&c.old_value),
                     "newValue":       u256_to_hex(&c.new_value),
                 }))
+                .collect();
+            serde_json::Value::Array(results).to_string()
+        })?)?;
+    }
+
+    // getStateChangesRaw(from, to) → JSON 字符串
+    // from/to = -1 时不限范围，返回全部账户/余额/nonce 变化事件
+    {
+        use crate::op_trace::debug_session::StateChangeKind;
+        let p = session_ptr;
+        g.set("getStateChangesRaw", Function::new(ctx.clone(), move |from: i64, to: i64| -> String {
+            let sess = unsafe { &*(p as *const DebugSession) };
+            let from_idx = if from < 0 { 0usize } else { from as usize };
+            let to_idx   = if to < 0   { usize::MAX } else { to as usize };
+            let results: Vec<_> = sess.state_changes.iter()
+                .filter(|r| r.step_index >= from_idx && r.step_index <= to_idx)
+                .map(|r| {
+                    let base = serde_json::json!({
+                        "stepIndex":     r.step_index as u32,
+                        "transactionId": r.transaction_id,
+                        "frameId":       r.frame_id,
+                    });
+                    let mut obj = base.as_object().unwrap().clone();
+                    match &r.kind {
+                        StateChangeKind::AccountCreated { address, is_created_globally } => {
+                            obj.insert("category".into(), "account".into());
+                            obj.insert("kind".into(), "AccountCreated".into());
+                            obj.insert("address".into(), bytes_to_hex(address.as_slice()).into());
+                            obj.insert("isCreatedGlobally".into(), (*is_created_globally).into());
+                        }
+                        StateChangeKind::AccountDestroyed { address, target, had_balance } => {
+                            obj.insert("category".into(), "account".into());
+                            obj.insert("kind".into(), "AccountDestroyed".into());
+                            obj.insert("address".into(), bytes_to_hex(address.as_slice()).into());
+                            obj.insert("target".into(), bytes_to_hex(target.as_slice()).into());
+                            obj.insert("hadBalance".into(), u256_to_hex(had_balance).into());
+                        }
+                        StateChangeKind::BalanceChange { address, old_balance, new_balance } => {
+                            obj.insert("category".into(), "balance".into());
+                            obj.insert("kind".into(), "BalanceChange".into());
+                            obj.insert("address".into(), bytes_to_hex(address.as_slice()).into());
+                            obj.insert("oldBalance".into(), u256_to_hex(old_balance).into());
+                            obj.insert("newBalance".into(), u256_to_hex(new_balance).into());
+                        }
+                        StateChangeKind::BalanceTransfer { from, to, balance } => {
+                            obj.insert("category".into(), "balance".into());
+                            obj.insert("kind".into(), "BalanceTransfer".into());
+                            obj.insert("from".into(), bytes_to_hex(from.as_slice()).into());
+                            obj.insert("to".into(), bytes_to_hex(to.as_slice()).into());
+                            obj.insert("balance".into(), u256_to_hex(balance).into());
+                        }
+                        StateChangeKind::NonceChange { address, previous_nonce, new_nonce } => {
+                            obj.insert("category".into(), "nonce".into());
+                            obj.insert("kind".into(), "NonceChange".into());
+                            obj.insert("address".into(), bytes_to_hex(address.as_slice()).into());
+                            obj.insert("previousNonce".into(), (*previous_nonce).into());
+                            obj.insert("newNonce".into(), (*new_nonce).into());
+                        }
+                        StateChangeKind::NonceBump { address, previous_nonce, new_nonce } => {
+                            obj.insert("category".into(), "nonce".into());
+                            obj.insert("kind".into(), "NonceBump".into());
+                            obj.insert("address".into(), bytes_to_hex(address.as_slice()).into());
+                            obj.insert("previousNonce".into(), (*previous_nonce).into());
+                            obj.insert("newNonce".into(), (*new_nonce).into());
+                        }
+                    }
+                    serde_json::Value::Object(obj)
+                })
                 .collect();
             serde_json::Value::Array(results).to_string()
         })?)?;

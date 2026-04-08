@@ -41,6 +41,10 @@ pub struct FrameRecord {
     pub step_count:      usize,
     /// Whether the call succeeded; filled at call_end
     pub success:         bool,
+    /// True when this frame itself succeeded but a parent/ancestor frame reverted,
+    /// meaning all state changes made by this frame were ultimately rolled back.
+    /// Filled by `mark_children_reverted_by_parent()` after parent finalization.
+    pub reverted_by_parent: bool,
 }
 
 
@@ -61,6 +65,45 @@ pub struct StorageChangeRecord {
     pub old_value:   U256,
     /// For reads: the value returned. For writes: the new value written.
     pub new_value:   U256,
+}
+
+/// One KECCAK256 event captured at step_end (input + output hash).
+#[derive(Clone)]
+pub struct KeccakRecord {
+    /// Global step index (0-based, aligns with `trace` index)
+    pub step_index: usize,
+    /// 多笔交易时第几笔（0-based）；单 tx 恒为 0
+    pub transaction_id: u32,
+    pub frame_id: u16,
+    /// Raw input bytes read from memory[offset : offset+size]
+    pub input: Vec<u8>,
+    /// KECCAK256 output hash (32 bytes)
+    pub hash: [u8; 32],
+}
+
+/// EVM journal 中的账户/余额/nonce 状态变化事件（6 种 JournalEntry 的归一化结构）
+#[derive(Clone)]
+pub enum StateChangeKind {
+    /// JournalEntry::AccountCreated
+    AccountCreated  { address: Address, is_created_globally: bool },
+    /// JournalEntry::AccountDestroyed
+    AccountDestroyed { address: Address, target: Address, had_balance: U256 },
+    /// JournalEntry::BalanceChange
+    BalanceChange   { address: Address, old_balance: U256, new_balance: U256 },
+    /// JournalEntry::BalanceTransfer
+    BalanceTransfer { from: Address, to: Address, balance: U256 },
+    /// JournalEntry::NonceChange
+    NonceChange     { address: Address, previous_nonce: u64, new_nonce: u64 },
+    /// JournalEntry::NonceBump
+    NonceBump       { address: Address, previous_nonce: u64, new_nonce: u64 },
+}
+
+#[derive(Clone)]
+pub struct StateChangeRecord {
+    pub step_index:      usize,
+    pub transaction_id:  u32,
+    pub frame_id:        u16,
+    pub kind:            StateChangeKind,
 }
 
 /// 每个step的轻量存储，供 seek_to 使用
@@ -129,6 +172,12 @@ pub struct DebugSession {
     pub frame_map: HashMap<FrameScopeKey, FrameRecord>,
     /// All storage read/write events in execution order
     pub storage_changes: Vec<StorageChangeRecord>,
+    /// Account / balance / nonce state change events from EVM journal
+    pub state_changes: Vec<StateChangeRecord>,
+    /// All KECCAK256 events in execution order
+    pub keccak_ops: Vec<KeccakRecord>,
+    /// (transaction_id, context_id) -> step_index -> index in `keccak_ops`
+    pub keccak_index: HashMap<FrameScopeKey, HashMap<usize, usize>>,
     /// 数据流追踪（Shadow Stack / Memory / Storage）
     pub shadow: Option<super::shadow::ShadowState>,
     /// 每帧的字节码，供 CFG 后端构建使用
@@ -147,6 +196,9 @@ impl DebugSession {
             step_index: HashMap::new(),
             frame_map: HashMap::new(),
             storage_changes: Vec::new(),
+            state_changes: Vec::new(),
+            keccak_ops: Vec::new(),
+            keccak_index: HashMap::new(),
             shadow: None,
             frame_bytecodes: HashMap::new(),
             frame_terminal_states: HashMap::new(),
@@ -175,8 +227,33 @@ impl DebugSession {
         }
     }
 
+    /// When a parent frame fails, mark all its direct children's `reverted_by_parent = true`.
+    /// Call this after `finalize_frame(…, success=false, …)` for the failed frame.
+    pub fn mark_children_reverted_by_parent(&mut self, tid: u32, parent_id: u16) {
+        for rec in self.frame_map.values_mut() {
+            if rec.transaction_id == tid && rec.parent_id == parent_id {
+                rec.reverted_by_parent = true;
+            }
+        }
+    }
+
     pub fn push_storage_change(&mut self, change: StorageChangeRecord) {
         self.storage_changes.push(change);
+    }
+
+    pub fn push_state_change(&mut self, change: StateChangeRecord) {
+        self.state_changes.push(change);
+    }
+
+    pub fn push_keccak_op(&mut self, rec: KeccakRecord) {
+        let idx = self.keccak_ops.len();
+        let key = (rec.transaction_id, rec.frame_id);
+        self.keccak_ops.push(rec);
+        let step = self.keccak_ops[idx].step_index;
+        self.keccak_index
+            .entry(key)
+            .or_default()
+            .insert(step, idx);
     }
 
     /// 追加一个 step 到 trace 并更新索引

@@ -5,6 +5,7 @@ use revm_interpreter::InstructionResult;
 use serde::Serialize;
 use std::sync::Arc;
 use tauri::ipc::{Channel, InvokeResponseBody};
+use crate::op_trace::debug_session::{StateChangeKind, StateChangeRecord};
 
 
 #[repr(u8)]
@@ -20,6 +21,8 @@ enum MsgType {
     FrameExit = 9,
     SelfDestruct = 10,
     BalanceChanges = 11,
+    KeccakOp = 12,
+    StateChange = 13,
     Finished = 255,
 }
 
@@ -28,7 +31,8 @@ enum MsgType {
 const STEP_BATCH_SIZE: usize = 800;
 
 /// 需要在 StepBatch 中携带栈顶 3 项的 opcode 集合
-const NEEDS_STACK: [u8; 9] = [
+const NEEDS_STACK: [u8; 10] = [
+    0x20, // KECCAK256: offset, size
     0x54, // SLOAD
     0x55, // SSTORE
     0xa1, 0xa2, 0xa3, 0xa4, // LOG1-LOG4
@@ -321,6 +325,27 @@ impl MessageEncoder {
         let _ = self.channel.send(InvokeResponseBody::Raw(packet));
     }
 
+    /// 发送 KeccakOp
+    /// 布局: [type:1][transaction_id:4][context_id:2][step_index:8][hash:32][input_len:4][input...]
+    pub fn send_keccak_op(
+        &self,
+        transaction_id: u32,
+        context_id: u16,
+        step_index: usize,
+        hash: &[u8; 32],
+        input: &[u8],
+    ) {
+        let mut packet = Vec::with_capacity(1 + 4 + 2 + 8 + 32 + 4 + input.len());
+        packet.push(MsgType::KeccakOp as u8);
+        packet.extend_from_slice(&transaction_id.to_be_bytes());
+        packet.extend_from_slice(&context_id.to_be_bytes());
+        packet.extend_from_slice(&step_index.to_be_bytes());
+        packet.extend_from_slice(hash);
+        packet.extend_from_slice(&(input.len() as u32).to_be_bytes());
+        packet.extend_from_slice(input);
+        let _ = self.channel.send(InvokeResponseBody::Raw(packet));
+    }
+
     /// 发送 Logs（JSON 序列化的 Log）
     /// 布局：`[type:1][context_id:2][step_index:8 BE][transaction_id:4 BE][json...]`
     pub fn send_logs(
@@ -336,6 +361,69 @@ impl MessageEncoder {
         packet.extend_from_slice(&context_id.to_be_bytes());
         packet.extend_from_slice(&step_index.to_be_bytes());
         packet.extend_from_slice(&transaction_id.to_be_bytes());
+        packet.extend_from_slice(json.as_bytes());
+        let _ = self.channel.send(InvokeResponseBody::Raw(packet));
+    }
+
+    /// 发送 StateChange（账户/余额/nonce 变化）
+    /// 格式: [type:1][transaction_id:4][frame_id:2][step_index:8][json...]
+    /// JSON 包含 category, kind 以及变化相关字段
+    pub fn send_state_change(&self, rec: &StateChangeRecord) {
+        fn hex(b: &[u8]) -> String {
+            format!("0x{}", hex::encode(b))
+        }
+        fn u256_hex(v: &U256) -> String {
+            format!("0x{}", hex::encode(v.to_be_bytes::<32>()))
+        }
+        let json_val = match &rec.kind {
+            StateChangeKind::AccountCreated { address, is_created_globally } => serde_json::json!({
+                "category": "account",
+                "kind": "AccountCreated",
+                "address": hex(address.as_slice()),
+                "isCreatedGlobally": is_created_globally,
+            }),
+            StateChangeKind::AccountDestroyed { address, target, had_balance } => serde_json::json!({
+                "category": "account",
+                "kind": "AccountDestroyed",
+                "address": hex(address.as_slice()),
+                "target": hex(target.as_slice()),
+                "hadBalance": u256_hex(had_balance),
+            }),
+            StateChangeKind::BalanceChange { address, old_balance, new_balance } => serde_json::json!({
+                "category": "balance",
+                "kind": "BalanceChange",
+                "address": hex(address.as_slice()),
+                "oldBalance": u256_hex(old_balance),
+                "newBalance": u256_hex(new_balance),
+            }),
+            StateChangeKind::BalanceTransfer { from, to, balance } => serde_json::json!({
+                "category": "balance",
+                "kind": "BalanceTransfer",
+                "from": hex(from.as_slice()),
+                "to": hex(to.as_slice()),
+                "balance": u256_hex(balance),
+            }),
+            StateChangeKind::NonceChange { address, previous_nonce, new_nonce } => serde_json::json!({
+                "category": "nonce",
+                "kind": "NonceChange",
+                "address": hex(address.as_slice()),
+                "previousNonce": previous_nonce,
+                "newNonce": new_nonce,
+            }),
+            StateChangeKind::NonceBump { address, previous_nonce, new_nonce } => serde_json::json!({
+                "category": "nonce",
+                "kind": "NonceBump",
+                "address": hex(address.as_slice()),
+                "previousNonce": previous_nonce,
+                "newNonce": new_nonce,
+            }),
+        };
+        let json = serde_json::to_string(&json_val).unwrap();
+        let mut packet = Vec::with_capacity(1 + 4 + 2 + 8 + json.len());
+        packet.push(MsgType::StateChange as u8);
+        packet.extend_from_slice(&rec.transaction_id.to_be_bytes());
+        packet.extend_from_slice(&rec.frame_id.to_be_bytes());
+        packet.extend_from_slice(&rec.step_index.to_be_bytes());
         packet.extend_from_slice(json.as_bytes());
         let _ = self.channel.send(InvokeResponseBody::Raw(packet));
     }

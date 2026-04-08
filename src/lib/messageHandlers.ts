@@ -1,5 +1,5 @@
 import type { ParsedStepBatchResult, StepData, StepStackEntry } from "./stepPlayer";
-import { unpackCompactToSteps } from "./stepPlayer";
+import { unpackCompactToSteps, unpackCompactStep } from "./stepPlayer";
 import { frameScopeKey, frameScopeKeyFromFrame, frameScopeKeyFromStep } from "./frameScope";
 import { disassemble, type Opcode } from "./opcodes";
 import { useDebugStore } from "@/store/debugStore";
@@ -11,6 +11,8 @@ import {
     type MemorySnapshot,
     type ReturnDataEntry,
     type StorageChangeEntry,
+    type StateChangeEntry,
+    type KeccakEntry,
     type AddressBalance,
     type CallFrame,
     type CallTreeNode,
@@ -20,7 +22,7 @@ import {
 
 // Re-export types for backward compatibility
 export { MsgType, InstructionResult } from "./types";
-export type { LogEntry, MemoryPatch, MemorySnapshot, ReturnDataEntry, StorageChangeEntry, CallFrame, CallTreeNode, CallTreeNodeType, MessageHandlerContext } from "./types";
+export type { LogEntry, MemoryPatch, MemorySnapshot, ReturnDataEntry, StorageChangeEntry, StateChangeEntry, KeccakEntry, CallFrame, CallTreeNode, CallTreeNodeType, MessageHandlerContext } from "./types";
 
 /** 流式阶段减少 Zustand 与 CFG emit 频率（仍会在首步与 finalize 刷新）。 */
 const STEP_COUNT_STORE_INTERVAL = 15_000;
@@ -48,6 +50,9 @@ export function createMessageRuntimeState(): MessageRuntimeState {
         stepBatchPendingResults: new Map(),
         finishedDeferred: false,
         startDebugInFlight: false,
+        allCompactBatches: [],
+        totalStreamedStepCount: 0,
+        keccakOps: new Map(),
     };
 }
 
@@ -68,6 +73,9 @@ export function markDebugPerfStart(runtime: MessageRuntimeState) {
     runtime.stepBatchPendingResults.clear();
     runtime.finishedDeferred = false;
     runtime.startDebugInFlight = false;
+    runtime.allCompactBatches = [];
+    runtime.totalStreamedStepCount = 0;
+    runtime.keccakOps.clear();
 }
 
 function _hashBytecode(bytes: Uint8Array): string {
@@ -94,7 +102,7 @@ function maybeLogStreamPerf(context: MessageHandlerContext) {
     if (now - context.runtime.perfStreamLastLogMs < 2000) return;
     context.runtime.perfStreamLastLogMs = now;
     const totalMs = now - context.runtime.debugStartPerfMs;
-    const totalSteps = context.allStepsRef.current.length;
+    const totalSteps = context.runtime.totalStreamedStepCount;
     console.log(
         `[perf.frontend.stream] ${totalMs.toFixed(0)}ms steps=${totalSteps.toLocaleString()} batches=${context.runtime.perfStepBatchCount} parse=${context.runtime.perfStepParseMs.toFixed(1)}ms index=${context.runtime.perfStepIndexMs.toFixed(1)}ms contract=${context.runtime.perfContractSourceCount} disasm=${context.runtime.perfContractDisasmMs.toFixed(1)}ms hex=${context.runtime.perfContractHexMs.toFixed(1)}ms`
     );
@@ -120,6 +128,26 @@ export function resetPendingFrameEnters(runtime: MessageRuntimeState) {
     runtime.stepBatchPendingResults.clear();
     runtime.finishedDeferred = false;
     runtime.startDebugInFlight = false;
+    runtime.allCompactBatches = [];
+    runtime.totalStreamedStepCount = 0;
+    runtime.keccakOps.clear();
+}
+
+/** 从 allCompactBatches 按全局下标获取 frame scope key，不分配 StepData 对象 */
+function getScopeAtIndex(
+    batches: Array<{ compact: Float64Array }>,
+    globalIndex: number
+): string | undefined {
+    let offset = globalIndex;
+    for (const batch of batches) {
+        const batchSize = (batch.compact.length / 8) | 0;
+        if (offset < batchSize) {
+            const b = offset * 8;
+            return `${batch.compact[b]}:${batch.compact[b + 1]}`;
+        }
+        offset -= batchSize;
+    }
+    return undefined;
 }
 
 function finalizeFinished(context: MessageHandlerContext) {
@@ -128,9 +156,35 @@ function finalizeFinished(context: MessageHandlerContext) {
         clearTimeout(context.runtime.callFramesFlushTimer);
         context.runtime.callFramesFlushTimer = null;
     }
+    // 一次性展开全部 compact 批次 → allStepsRef（流式阶段零对象分配的核心收益点）
+    const t0 = performance.now();
+    const allSteps: StepData[] = [];
+    for (const batch of context.runtime.allCompactBatches) {
+        const batchSteps = unpackCompactToSteps(batch.compact, batch.stackEntries);
+        for (let i = 0; i < batchSteps.length; i++) allSteps.push(batchSteps[i]!);
+    }
+    context.allStepsRef.current = allSteps;
+    context.runtime.allCompactBatches = [];  // 释放 compact 内存
+    const t1 = performance.now();
     context.callTreeRef.current = buildCallTree(
         context.allStepsRef.current,
-        context.callFramesRef.current
+        context.callFramesRef.current,
+        context.runtime.keccakOps
+    );
+    const t2 = performance.now();
+    console.log(
+        `[perf.finalizeFinished] unpack=${(t1 - t0).toFixed(1)}ms buildCallTree=${(t2 - t1).toFixed(1)}ms` +
+        ` steps=${allSteps.length.toLocaleString()} batches=${(allSteps.length / 800).toFixed(0)}`
+    );
+    // 流式阶段累计耗时汇总（Worker parse + 主线程 index 构建）
+    const rt = context.runtime;
+    const streamTotalMs = rt.debugStartPerfMs !== null ? (t0 - rt.debugStartPerfMs) : 0;
+    console.log(
+        `[perf.stream.breakdown] total=${streamTotalMs.toFixed(0)}ms` +
+        ` workerParse=${rt.perfStepParseMs.toFixed(0)}ms` +
+        ` mainIndex=${rt.perfStepIndexMs.toFixed(0)}ms` +
+        ` contract(disasm=${rt.perfContractDisasmMs.toFixed(0)}ms hex=${rt.perfContractHexMs.toFixed(0)}ms count=${rt.perfContractSourceCount})` +
+        ` unaccounted=${(streamTotalMs - rt.perfStepParseMs - rt.perfStepIndexMs - rt.perfContractDisasmMs - rt.perfContractHexMs).toFixed(0)}ms`
     );
     // 一次性计算 executedOpcodeSet，避免流式阶段反复创建 Set
     const executedOpcodeSet = new Set(context.opcodeIndex.current.keys());
@@ -159,13 +213,13 @@ function applyParsedStepBatch(parsed: ParsedStepBatchResult, context: MessageHan
     context.runtime.perfStepIndexMs += parsed.indexBuildMs;
     context.runtime.perfStepBatchCount += 1;
 
-    const arr = context.allStepsRef.current;
-    const add = parsed.steps;
-    const prevCount = arr.length;
-    // 预分配 + 直接索引赋值，避免 spread 展开大数组时的参数栈开销
-    arr.length = prevCount + add.length;
-    for (let i = 0; i < add.length; i++) arr[prevCount + i] = add[i];
-    const newCount = arr.length;
+    const { compact, stackEntries, stepCount: batchSize } = parsed;
+    const prevTotal = context.runtime.totalStreamedStepCount;
+
+    // 暂存 compact 批次，不创建 StepData 对象（减少 GC 压力）
+    context.runtime.allCompactBatches.push({ compact, stackEntries });
+    context.runtime.totalStreamedStepCount = prevTotal + batchSize;
+    const newTotal = context.runtime.totalStreamedStepCount;
 
     const applyIndexStartMs = performance.now();
     const stepIdx = context.stepIndexByContext.current;
@@ -176,13 +230,13 @@ function applyParsedStepBatch(parsed: ParsedStepBatchResult, context: MessageHan
             arr = [];
             stepIdx.set(scopeKey, arr);
         }
-        for (let i = 0; i < localIndexes.length; i++) arr.push(prevCount + localIndexes[i]);
+        for (let i = 0; i < localIndexes.length; i++) arr.push(prevTotal + localIndexes[i]);
         if (!context.runtime.firstStepIndexByScope.has(scopeKey) && localIndexes.length > 0) {
             let minL = localIndexes[0]!;
             for (let i = 1; i < localIndexes.length; i++) {
                 if (localIndexes[i]! < minL) minL = localIndexes[i]!;
             }
-            context.runtime.firstStepIndexByScope.set(scopeKey, prevCount + minL);
+            context.runtime.firstStepIndexByScope.set(scopeKey, prevTotal + minL);
         }
     }
     for (const [opcode, localIndexes] of parsed.opcodeLocalIndexes) {
@@ -191,21 +245,23 @@ function applyParsedStepBatch(parsed: ParsedStepBatchResult, context: MessageHan
             arr = [];
             opcodeIdx.set(opcode, arr);
         }
-        for (let i = 0; i < localIndexes.length; i++) arr.push(prevCount + localIndexes[i]);
+        for (let i = 0; i < localIndexes.length; i++) arr.push(prevTotal + localIndexes[i]);
     }
     context.runtime.perfStepIndexMs += performance.now() - applyIndexStartMs;
 
     if (
-        prevCount === 0 ||
-        Math.floor(prevCount / STEP_COUNT_STORE_INTERVAL) !==
-            Math.floor(newCount / STEP_COUNT_STORE_INTERVAL)
+        prevTotal === 0 ||
+        Math.floor(prevTotal / STEP_COUNT_STORE_INTERVAL) !==
+            Math.floor(newTotal / STEP_COUNT_STORE_INTERVAL)
     ) {
-        context.setStepCount(newCount);
+        context.setStepCount(newTotal);
     }
 
-    if (prevCount === 0 && parsed.steps.length > 0) {
-        const firstStep = parsed.steps[0];
-        if (context.runtime.frameByCtx.has(frameScopeKeyFromStep(firstStep))) {
+    // 首批到达时：仅展开 step[0] 供 applyStep 初始导航用（1次分配而非整批）
+    if (prevTotal === 0 && batchSize > 0) {
+        const firstScope = `${compact[0]}:${compact[1]}`;
+        if (context.runtime.frameByCtx.has(firstScope)) {
+            context.allStepsRef.current[0] = unpackCompactStep(compact, stackEntries, 0);
             context.applyStep(0);
         }
     }
@@ -239,11 +295,20 @@ function ensureStepBatchWorker(context: MessageHandlerContext): Worker {
     }>) => {
         const msg = event.data;
         if (!msg || msg.kind !== "parsed") return;
-        // compact 经 transferList 零复制到达，拆包为 StepData[] 只是紧凑循环，无结构化克隆开销
-        const steps = unpackCompactToSteps(msg.compact, msg.stackEntries);
+        // compact 经 transferList 零复制到达，流式阶段直接暂存，Finished 后统一展开
+        // [perf probe] 计时"假如当场展开"需要多少时间，供决策是否回到到达即展开方案
+        const _t0 = performance.now();
+        const _probe = unpackCompactToSteps(msg.compact, msg.stackEntries);
+        const _unpackMs = performance.now() - _t0;
+        void _probe; // 防止被 tree-shake
+        if (context.runtime.perfStepBatchCount === 0 || context.runtime.perfStepBatchCount % 50 === 49) {
+            console.log(`[perf.probe] seq=${msg.seq} unpackMs=${_unpackMs.toFixed(2)} steps=${_probe.length}`);
+        }
         context.runtime.stepBatchPendingCount = Math.max(0, context.runtime.stepBatchPendingCount - 1);
         context.runtime.stepBatchPendingResults.set(msg.seq, {
-            steps,
+            compact: msg.compact,
+            stackEntries: msg.stackEntries,
+            stepCount: (msg.compact.length / 8) | 0,
             contextLocalIndexes: msg.contextLocalIndexes,
             opcodeLocalIndexes: msg.opcodeLocalIndexes,
             parseMs: msg.parseMs,
@@ -366,17 +431,20 @@ export function handleContractSource(
     // 如果还没有开始播放，检查是否可以应用某一步（用增量 firstStepIndexByScope，避免对整段 trace findIndex）
     if (
         context.currentStepIndexRef.current === -1 &&
-        context.allStepsRef.current.length > 0
+        context.runtime.totalStreamedStepCount > 0
     ) {
         let best = -1;
         for (const scope of context.runtime.frameByCtx.keys()) {
             const idx = context.runtime.firstStepIndexByScope.get(scope);
             if (idx !== undefined && (best < 0 || idx < best)) best = idx;
         }
-        if (best >= 0 && best < context.allStepsRef.current.length) {
-            const step = context.allStepsRef.current[best]!;
-            const frame = context.runtime.frameByCtx.get(frameScopeKeyFromStep(step))!;
-            context.setActiveTab(frame.id);
+        if (best >= 0 && best < context.runtime.totalStreamedStepCount) {
+            // 从 compact 批次直接读 scope，无需创建完整 StepData
+            const scope = getScopeAtIndex(context.runtime.allCompactBatches, best);
+            if (scope) {
+                const frame = context.runtime.frameByCtx.get(scope);
+                if (frame) context.setActiveTab(frame.id);
+            }
             context.applyStep(best);
         } else {
             context.setActiveTab(newFrame.id);
@@ -585,6 +653,33 @@ export function handleStorageChange(
     }
 }
 
+/**
+ * 处理 KeccakOp 消息
+ * 格式: [transaction_id:4][context_id:2][step_index:8][hash:32][input_len:4][input...]
+ */
+export function handleKeccakOp(
+    body: Uint8Array,
+    context: MessageHandlerContext
+) {
+    if (body.byteLength < 4 + 2 + 8 + 32 + 4) return;
+    const dv = new DataView(body.buffer, body.byteOffset, body.byteLength);
+    const transactionId = dv.getUint32(0, false);
+    const contextId = dv.getUint16(4, false);
+    const stepIndex = Number(dv.getBigUint64(6, false));
+    const hashBytes = body.slice(14, 46);
+    const inputLen = dv.getUint32(46, false);
+    const inputBytes = body.slice(50, 50 + inputLen);
+
+    const hash = '0x' + fastHex(hashBytes);
+    const input = inputBytes.length > 0 ? fastHex(inputBytes) : '';
+
+    let m1 = context.runtime.keccakOps.get(transactionId);
+    if (!m1) { m1 = new Map(); context.runtime.keccakOps.set(transactionId, m1); }
+    let m2 = m1.get(contextId);
+    if (!m2) { m2 = new Map(); m1.set(contextId, m2); }
+    m2.set(stepIndex, { transactionId, contextId, stepIndex, hash, input, inputLength: inputLen });
+}
+
 // computeMemoryAtStep: hex tables
 const _MEM_HEX = (() => {
     const t = new Array<string>(256);
@@ -599,6 +694,36 @@ const _UNHEX = (() => {
     return t;
 })();
 
+/** 仅由 memoryPatches 重建内存（前端通常无快照，只靠补丁） */
+export function memoryBytesFromPatches(
+    patches: MemoryPatch[],
+    maxFrameStepInclusive: number,
+): Uint8Array {
+    const relevant = patches.filter((p) => p.frameStepCount <= maxFrameStepInclusive);
+    if (relevant.length === 0) return new Uint8Array(0);
+    let maxSize = 0;
+    for (const p of relevant) {
+        const end = p.dstOffset + p.data.length;
+        if (end > maxSize) maxSize = end;
+    }
+    const memBytes = new Uint8Array(maxSize);
+    for (const p of relevant) {
+        memBytes.set(p.data, p.dstOffset);
+    }
+    return memBytes;
+}
+
+function u256HexToBigInt(h: string | undefined): bigint | null {
+    if (!h) return null;
+    const x = h.startsWith("0x") ? h.slice(2) : h;
+    if (!x) return null;
+    try {
+        return BigInt("0x" + x);
+    } catch {
+        return null;
+    }
+}
+
 /**
  * 计算指定 frameStepCount 时的内存状态
  * @param snapshots 全量内存快照列表
@@ -611,7 +736,13 @@ export function computeMemoryAtStep(
     patches: MemoryPatch[],
     frameStepCount: number
 ): string {
-    if (snapshots.length === 0) return "0x";
+    if (snapshots.length === 0) {
+        const bytes = memoryBytesFromPatches(patches, frameStepCount);
+        if (bytes.length === 0) return "0x";
+        const hexParts = new Array<string>(bytes.length);
+        for (let i = 0; i < bytes.length; i++) hexParts[i] = _MEM_HEX[bytes[i]!];
+        return "0x" + hexParts.join("");
+    }
 
     // 二分找最大的 <= frameStepCount 快照（snapshots 单调递增追加）
     let lo = 0, hi = snapshots.length - 1, snapshotIdx = -1;
@@ -716,6 +847,41 @@ export function handleMessage(
         case MsgType.StorageChange:
             handleStorageChange(body, context);
             break;
+
+        case MsgType.KeccakOp:
+            handleKeccakOp(body, context);
+            break;
+
+        case MsgType.StateChange: {
+            // 格式: [transaction_id:4][frame_id:2][step_index:8][json...]
+            const scDv = new DataView(body.buffer, body.byteOffset, body.byteLength);
+            const scTransactionId = scDv.getUint32(0, false);
+            const scFrameId = scDv.getUint16(4, false);
+            const scStepIndex = Number(scDv.getBigUint64(6, false));
+            const scParsed = JSON.parse(new TextDecoder().decode(body.slice(14))) as Record<string, unknown>;
+            const scEntry: StateChangeEntry = {
+                stepIndex: scStepIndex,
+                transactionId: scTransactionId,
+                frameId: scFrameId,
+                category: scParsed.category as StateChangeEntry["category"],
+                kind: scParsed.kind as StateChangeEntry["kind"],
+                address: scParsed.address as string | undefined,
+                isCreatedGlobally: scParsed.isCreatedGlobally as boolean | undefined,
+                target: scParsed.target as string | undefined,
+                hadBalance: scParsed.hadBalance as string | undefined,
+                oldBalance: scParsed.oldBalance as string | undefined,
+                from: scParsed.from as string | undefined,
+                to: scParsed.to as string | undefined,
+                balance: scParsed.balance as string | undefined,
+                previousNonce: scParsed.previousNonce as number | undefined,
+                newNonce: scParsed.newNonce as number | undefined,
+                newBalance: scParsed.newBalance as string | undefined,
+            };
+            useDebugStore.getState().sync({
+                stateChanges: [...useDebugStore.getState().stateChanges, scEntry],
+            });
+            break;
+        }
 
         case MsgType.FrameExit: {
             // 旧: [frame_id:2] [result:1] [success:1] [gas_used:8] [output_len:4] [output:N]
@@ -860,7 +1026,7 @@ export function handleMessage(
  * 在调试结束后一次性构建扁平 call tree 节点列表
  * O(n) 单次遍历
  */
-export function buildCallTree(steps: StepData[], frames: CallFrame[]): CallTreeNode[] {
+export function buildCallTree(steps: StepData[], frames: CallFrame[], keccakOps?: Map<number, Map<number, Map<number, KeccakEntry>>>): CallTreeNode[] {
     const nodes: CallTreeNode[] = [];
     const seenScope = new Set<string>();
     const frameMap = new Map(frames.map(f => [frameScopeKeyFromFrame(f), f]));
@@ -940,6 +1106,8 @@ export function buildCallTree(steps: StepData[], frames: CallFrame[]): CallTreeN
                 selfdestructContract: frame?.selfdestructContract,
                 selfdestructTarget: frame?.selfdestructTarget,
                 selfdestructValue: frame?.selfdestructValue,
+                // Frame itself succeeded but an ancestor failed → changes were rolled back
+                revertedByParent: frame?.success !== false && revertedScopes.has(sk),
             });
         }
 
@@ -1005,6 +1173,22 @@ export function buildCallTree(steps: StepData[], frames: CallFrame[]): CallTreeN
                 oldValue: sc?.hadValue,
                 newValue: sc?.newValue ?? step.stackSecond,
                 reverted: revertedScopes.has(sk),
+            });
+        }
+        // KECCAK256 (0x20): 数据来自后端 KeccakOp 消息（同 StorageChange 模式）
+        else if (op === 0x20) {
+            const entry = keccakOps?.get(stepTid)?.get(step.contextId)?.get(i);
+            const sizeBI = step.stackSecond ? u256HexToBigInt(step.stackSecond) : null;
+            nodes.push({
+                id: nodes.length,
+                type: 'keccak256',
+                stepIndex: i,
+                transactionId: stepTid,
+                contextId: step.contextId,
+                depth: step.depth + 1,
+                keccakInputLength: entry?.inputLength ?? (sizeBI !== null && sizeBI <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(sizeBI) : 0),
+                keccakInputPreview: entry?.input,
+                keccakHash: entry?.hash,
             });
         }
         // LOG0-LOG4 (0xa0-0xa4): consume from per-context log queue

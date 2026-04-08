@@ -1157,7 +1157,10 @@ export function AnalysisDrawer({
                 </Button>
               </div>
             </div>
-            <div className="flex-1 overflow-auto bg-white p-2 text-[11px] font-mono min-h-0">
+            <div
+              className="flex-1 overflow-auto bg-white p-2 text-[11px] font-mono min-h-0"
+              data-keyboard-scroll-root="analysis"
+            >
               {isRunning && !result && !error && (
                 <div className="flex items-center gap-2 text-muted-foreground p-2">
                   <Loader2 className="h-4 w-4 animate-spin" />

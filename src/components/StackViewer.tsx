@@ -18,17 +18,22 @@ interface StackViewerProps {
   stackMemoryAccess?: StackMemoryItem[];
   onMemoryHighlight?: (range: { start: number; end: number } | null) => void;
   onSeekTo?: (index: number) => void;
+  scrollContainerRef?: React.RefObject<HTMLDivElement | null>;
 }
 
 const ROW_HEIGHT = 20;
 
-export function StackViewer({ stackLabels = [], stackMemoryAccess = [], onMemoryHighlight, onSeekTo }: StackViewerProps) {
+export function StackViewer({ stackLabels = [], stackMemoryAccess = [], onMemoryHighlight, onSeekTo, scrollContainerRef }: StackViewerProps) {
   const stack = useDebugStore((s) => s.stack);
   const currentStepIndex = useDebugStore((s) => s.currentStepIndex);
   const activeTab = useDebugStore((s) => s.activeTab);
   const sessionId = useDebugStore((s) => s.sessionId);
   const openDataFlowModal = useDebugStore((s) => s.openDataFlowModal);
-  const parentRef = useRef<HTMLDivElement>(null);
+  const activePanelId = useDebugStore((s) => s.activePanelId);
+  const isActive = activePanelId === "stack";
+  
+  const internalRef = useRef<HTMLDivElement>(null);
+  const parentRef = scrollContainerRef || internalRef;
 
   // 逆序栈：后进先出，最新的元素在最上面
   const reversedStack = [...stack].reverse();
@@ -41,7 +46,9 @@ export function StackViewer({ stackLabels = [], stackMemoryAccess = [], onMemory
   });
 
   return (
-    <Card className="h-full flex flex-col">
+    <Card data-panel-id="stack" className={`h-full flex flex-col transition-all ${
+      isActive ? "ring-2 ring-primary ring-offset-1 ring-offset-background" : ""
+    }`}>
       <CardHeader className="py-1 px-3 flex-shrink-0 bg-muted/50 border-b">
         <CardTitle className="text-xs">Stack ({stack.length})</CardTitle>
       </CardHeader>
