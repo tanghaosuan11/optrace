@@ -54,6 +54,12 @@ OpTrace is a high-performance, open-source EVM Debugger for deep-dive Ethereum t
 - Highlight blocks/edges by execution sequence
 - Zoom, pan, center, and step-linked navigation
 
+### 9) Hint Mode
+- Press `F` to enter Hint Mode for keyboard-first click/navigation
+- Press `Shift+F` to open Panel Selector hints (`1`-`8`) and quickly focus a panel
+- Press the shown number key to select; press `Esc` to cancel
+- Press `?` to open keyboard shortcuts help
+
 ## Install & Run
 
 ```bash
