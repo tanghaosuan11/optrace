@@ -165,6 +165,7 @@ export function SourceViewer() {
   }, [activeStoreTab, callFrames]);
 
   const codeAddress = frame?.contract ?? frame?.address;
+  const foundrySourceJson = frame?.foundrySourceJson ?? null;
 
   const [rawJson, setRawJson] = useState<string | null>(null);
   const [loadingCache, setLoadingCache] = useState(false);
@@ -182,13 +183,14 @@ export function SourceViewer() {
     useRef<monacoNS.editor.IEditorDecorationsCollection | null>(null);
 
   const parsed = useMemo(() => {
-    if (!rawJson) return null;
+    const json = rawJson ?? foundrySourceJson;
+    if (!json) return null;
     try {
-      return JSON.parse(rawJson) as unknown;
+      return JSON.parse(json) as unknown;
     } catch {
       return null;
     }
-  }, [rawJson]);
+  }, [rawJson, foundrySourceJson]);
 
   const sources = useMemo(
     () => (parsed ? extractSources(parsed) : null),
@@ -409,7 +411,7 @@ export function SourceViewer() {
       highlightedText: content.slice(startChar, endChar).slice(0, 120),
     });
     try {
-      const p = JSON.parse(rawJson!) as Record<string, unknown>;
+      const p = JSON.parse((rawJson ?? foundrySourceJson)!) as Record<string, unknown>;
       const rm = p.runtimeMatch as Record<string, unknown> | undefined;
       const src = extractSources(p) ?? {};
       const first5Sources = Object.entries(src)
@@ -616,13 +618,13 @@ export function SourceViewer() {
   const monacoTheme = "vs";
 
   let overlay: React.ReactNode = null;
-  if (!chainId) {
+  if (!chainId && !foundrySourceJson) {
     overlay = (
       <p className="text-[11px] text-muted-foreground">
         Start a debug session to load chain context.
       </p>
     );
-  } else if (!codeAddress) {
+  } else if (!codeAddress && !foundrySourceJson) {
     overlay = (
       <p className="text-[11px] text-muted-foreground">
         No contract address on the current frame.
@@ -635,7 +637,7 @@ export function SourceViewer() {
         Checking local cache…
       </div>
     );
-  } else if (!rawJson) {
+  } else if (!rawJson && !foundrySourceJson) {
     overlay = (
       <>
         <p className="text-[11px] text-muted-foreground">

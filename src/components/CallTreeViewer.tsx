@@ -384,6 +384,11 @@ function NodeRow({ node, rowIndex, isCollapsed, isActive, isActiveEvent, hovered
               {fnLabel}
             </span>
           )}
+          {node.vmHelperArgs && (
+            <span className="inline-flex items-center font-mono flex-shrink-0 border border-violet-400/30 rounded-sm px-2 py-0.5 leading-none text-[11px] text-violet-400/80 whitespace-pre-wrap break-all">
+              ({node.vmHelperArgs})
+            </span>
+          )}
           {!isCreateType && node.input && node.input.replace(/^0x/, '').length >= 8 && (
             <CalldataPopover input={node.input} />
           )}
@@ -515,6 +520,17 @@ function NodeRow({ node, rowIndex, isCollapsed, isActive, isActiveEvent, hovered
   // log
   const topicCount = node.topics?.length ?? 0;
   const topic0 = node.topics?.[0];
+  // logData 可能是 Foundry 模式中 hex 编码的 emit 文本，尝试解码显示
+  let emitLabel: string | null = null;
+  if (node.logData && node.logData.length > 2) {
+    try {
+      const hex = node.logData.replace(/^0x/, '');
+      const bytes = new Uint8Array(hex.length / 2);
+      for (let i = 0; i < hex.length; i += 2) bytes[i / 2] = parseInt(hex.slice(i, i + 2), 16);
+      const decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      if (decoded.startsWith('emit ') || decoded.includes('(')) emitLabel = decoded;
+    } catch { /* not valid utf-8, ignore */ }
+  }
   return (
     <div
       className={`flex items-center h-full cursor-pointer select-none ${node.reverted ? 'text-violet-400/40' : 'text-violet-500'} ${isActiveEvent ? 'bg-amber-400/10 border-l-2 border-l-amber-400' : 'hover:bg-muted/40'}`}
@@ -525,7 +541,10 @@ function NodeRow({ node, rowIndex, isCollapsed, isActive, isActiveEvent, hovered
       <div className={`flex items-center gap-1.5 px-1.5 min-w-0 ${node.reverted ? 'line-through decoration-red-400/60' : ''}`}>
         {node.reverted && <span className="text-red-400/80 flex-shrink-0" style={{textDecoration:'none'}}>✗</span>}
           <OpBadge type="log" depth={node.depth} extra={topicCount} />
-        {topic0 && <span className="inline-flex items-center font-mono flex-shrink-0 border border-foreground/20 rounded-sm px-2 py-0.5 leading-none text-[11px] text-foreground/75">{fullHex(topic0)}</span>}
+        {emitLabel
+          ? <span className="text-xs font-mono truncate min-w-0 text-foreground/80">{emitLabel}</span>
+          : topic0 && <span className="inline-flex items-center font-mono flex-shrink-0 border border-foreground/20 rounded-sm px-2 py-0.5 leading-none text-[11px] text-foreground/75">{fullHex(topic0)}</span>
+        }
       </div>
     </div>
   );

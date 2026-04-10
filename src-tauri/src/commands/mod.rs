@@ -8,6 +8,7 @@ pub mod fork;
 pub mod cfg;
 pub mod symbolic;
 pub mod data;
+pub mod foundry;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

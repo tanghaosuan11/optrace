@@ -1,3 +1,8 @@
+use mimalloc::MiMalloc;
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 pub mod op_trace;
 mod optrace_journal;
 mod analysis;
@@ -24,6 +29,7 @@ pub fn run() {
         .manage(commands::AnalysisCancelFlags(Arc::new(Mutex::new(HashMap::new()))))
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::debug::greet,
             commands::debug::op_trace,
@@ -58,6 +64,7 @@ pub fn run() {
             sourcify::decompile_read_cache,
             sourcify::decompile_write_cache,
             sourcify::decompile_bytecode,
+            commands::foundry::start_foundry_debug,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

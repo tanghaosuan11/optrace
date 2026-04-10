@@ -60,6 +60,24 @@ OpTrace is a high-performance, open-source EVM Debugger for deep-dive Ethereum t
 - Press the shown number key to select; press `Esc` to cancel
 - Press `?` to open keyboard shortcuts help
 
+## Foundry Integration
+
+OpTrace can visualize test execution traces exported from Foundry.
+
+**Step 1 — Export the trace from your project root:**
+
+```bash
+forge test --debug --mp "test/**/**.t.sol" --match-test "<test_name>" -vvvv \
+  > ./optrace_calltree.json \
+  --dump ./optrace_dump.json
+```
+
+Replace `<test_name>` with the exact test function name you want to debug (e.g. `testExploit`). The two output files must be placed in the Foundry project root.
+
+**Step 2 — Open in OpTrace:**
+
+Launch OpTrace, click the **Foundry** button in the top-right corner of the main interface, then select the Foundry project root folder. OpTrace will load the trace and open the debugger automatically.
+
 ## Install & Run
 
 ```bash

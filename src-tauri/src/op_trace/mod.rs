@@ -7,7 +7,7 @@ use serde::Serialize;
 
 pub mod evm_runner;
 mod inspector;
-mod message_encoder;
+pub(crate) mod message_encoder;
 mod scan;
 pub mod debug_session;
 pub mod types;
@@ -21,9 +21,12 @@ pub mod cache;
 pub mod balance_diff;
 mod prestate;
 mod spec_schedule;
+pub mod foundry_dump;
+pub mod foundry_calltree;
 
 pub use debug_session::DebugSessionState;
 pub use evm_runner::{op_trace, tx_env_from_debug};
+pub use frame_manager::FrameInfo;
 pub use scan::{ConditionGroup, scan_conditions_impl};
 pub use types::{BlockDebugData, TxDebugData};
 

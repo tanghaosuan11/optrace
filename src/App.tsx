@@ -26,7 +26,7 @@ import { useDebugPlayback } from "./hooks/useDebugPlayback";
 import { type TxData, type BlockData, type TxListRow, type TxSlot } from "./lib/txFetcher";
 import { loadAppConfig, initAppConfig, setConfig } from "./lib/appConfig";
 import { useDebugStore } from "./store/debugStore";
-import { startDebugAction, resetAllAction, debugDump } from "./lib/debugActions";
+import { startDebugAction, resetAllAction, debugDump, startFoundryDebugAction } from "./lib/debugActions";
 import { useNavigation } from "./hooks/useNavigation";
 import { useConditionScan } from "./hooks/useConditionScan";
 import { useBreakpoints } from "./hooks/useBreakpoints";
@@ -577,6 +577,17 @@ function App() {
     startDebugRef.current = startDebug;
   }, [startDebug]);
 
+  // Foundry debug（方案A）
+  const startFoundryDebug = useCallback(() => void startFoundryDebugAction({
+    sessionIdRef, allStepsRef, callFramesRef, callTreeRef, currentStepIndexRef,
+    stepIndexByContext: stepIndexByContextRef,
+    opcodeIndex: opcodeIndexRef,
+    runtime: messageRuntimeRef.current,
+    resetPlayback: reset, applyStep, resetNav,
+    setStepCount, setCallFrames, setActiveTab, setIsDebugging,
+    setCurrentStepIndex, setIsPlaying,
+  }), [reset, applyStep, resetNav]);
+
   // Reset all
   const resetAll = useCallback(() => {
     cfgEmittedIndexRef.current = 0;
@@ -696,6 +707,7 @@ function App() {
             onSeekTo={seekToWithHistory}
             onSelectFrame={handleSelectFrame}
             onNavigateTo={navigateTo}
+            onStartFoundryDebug={startFoundryDebug}
           />
         </div>
         {isWhatIfMode && activeTab === "main" ? (

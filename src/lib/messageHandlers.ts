@@ -192,8 +192,8 @@ function finalizeFinished(context: MessageHandlerContext) {
         callTreeNodes: [...context.callTreeRef.current],
         executedOpcodeSet,
     });
-    // 强制同步最终状态到 React
-    context.setCallFrames([...context.callFramesRef.current]);
+    // 强制同步最终状态到 React（VM helper 帧仅用于 calltree，不进入 frame list）
+    context.setCallFrames(context.callFramesRef.current.filter(f => !f.isVmHelper));
     const totalSteps = context.allStepsRef.current.length;
     context.setStepCount(totalSteps);
     context.setIsDebugging(false);
@@ -327,7 +327,7 @@ function scheduleCallFramesFlush(context: MessageHandlerContext) {
     if (context.runtime.callFramesFlushTimer !== null) return;
     context.runtime.callFramesFlushTimer = setTimeout(() => {
         context.runtime.callFramesFlushTimer = null;
-        context.setCallFrames([...context.callFramesRef.current]);
+        context.setCallFrames(context.callFramesRef.current.filter(f => !f.isVmHelper));
     }, 350);
 }
 
@@ -343,6 +343,25 @@ export function handleStepBatch(
     context.runtime.stepBatchPendingCount += 1;
     const transferBody = body.slice();
     worker.postMessage({ kind: "parse", seq, body: transferBody }, [transferBody.buffer]);
+}
+
+/**
+ * 处理 FoundrySourceJson 消息（Foundry 模式源码+sourcemap，仅内存）
+ * 格式: [transaction_id:4][context_id:2][json_len:4][json_bytes]
+ */
+export function handleFoundrySourceJson(
+    body: Uint8Array,
+    context: MessageHandlerContext
+): void {
+    const dv = new DataView(body.buffer, body.byteOffset, body.byteLength);
+    const transactionId = dv.getUint32(0, false);
+    const contextId     = dv.getUint16(4, false);
+    const jsonLen       = dv.getUint32(6, false);
+    const jsonStr       = new TextDecoder().decode(body.slice(10, 10 + jsonLen));
+    const frame = context.runtime.frameByCtx.get(frameScopeKey(transactionId, contextId));
+    if (frame) {
+        frame.foundrySourceJson = jsonStr;
+    }
 }
 
 /**
@@ -421,6 +440,15 @@ export function handleContractSource(
         newFrame.gasUsed  = 0;
         newFrame.callType = (pending.kind as string)?.toLowerCase() as CallFrame["callType"];
         newFrame.parentId = pending.parent_id as number;
+        if (pending.is_vm_helper === true) {
+            newFrame.isVmHelper = true;
+            if (typeof pending.args === 'string' && pending.args.length > 0) {
+                newFrame.vmHelperArgs = pending.args;
+            }
+            if (pending.insert_before_ctx_id != null) {
+                newFrame.vmInsertBeforeCtxId = pending.insert_before_ctx_id as number;
+            }
+        }
         context.runtime.pendingFrameEnters.delete(scope);
     }
 
@@ -852,6 +880,10 @@ export function handleMessage(
             handleKeccakOp(body, context);
             break;
 
+        case MsgType.FoundrySourceJson:
+            handleFoundrySourceJson(body, context);
+            break;
+
         case MsgType.StateChange: {
             // 格式: [transaction_id:4][frame_id:2][step_index:8][json...]
             const scDv = new DataView(body.buffer, body.byteOffset, body.byteLength);
@@ -1210,6 +1242,107 @@ export function buildCallTree(steps: StepData[], frames: CallFrame[], keccakOps?
             });
         }
     }
+
+    // 补全轮：将 frame.logs 中未被 LOG 操作码步骤消费的日志条目插入 calltree
+    // 处理 Foundry dump 中 LOG 步骤可能缺失的情况（calltree-emit 来自文本，步骤来自 dump）
+    const logFallbackInserts: Array<{ at: number; node: CallTreeNode }> = [];
+    for (const [sk, queue] of logQueueByScope) {
+        const ptr = logPtrByScope.get(sk) ?? 0;
+        if (ptr >= queue.length) continue; // 全部已消费，无需补全
+        const frameNodeIdx = nodes.findIndex(n =>
+            n.type === 'frame' &&
+            frameScopeKey(n.transactionId ?? 0, n.contextId) === sk
+        );
+        if (frameNodeIdx < 0) continue;
+        const frameNode = nodes[frameNodeIdx];
+        const frameDepth = frameNode.depth;
+        // 该 frame 子树的末尾位置（下一个同深或浅的节点之前）
+        let endIdx = frameNodeIdx + 1;
+        while (endIdx < nodes.length && nodes[endIdx].depth > frameDepth) endIdx++;
+        for (let j = ptr; j < queue.length; j++) {
+            const logEntry = queue[j];
+            logFallbackInserts.push({
+                at: endIdx,
+                node: {
+                    id: 0,
+                    type: 'log',
+                    stepIndex: logEntry.stepIndex,
+                    transactionId: logEntry.transactionId ?? frameNode.transactionId,
+                    contextId: logEntry.contextId ?? frameNode.contextId,
+                    depth: frameDepth + 1,
+                    topics: logEntry.topics ?? [],
+                    logData: logEntry.data,
+                    reverted: revertedScopes.has(sk),
+                },
+            });
+        }
+    }
+    logFallbackInserts.sort((a, b) => b.at - a.at || b.node.stepIndex - a.node.stepIndex);
+    for (const { at, node } of logFallbackInserts) {
+        nodes.splice(at, 0, node);
+    }
+
+    // 第二轮：将 VM helper 帧精确插入 calltree 中的对应位置
+    // 每个 helper 携带 vmInsertBeforeCtxId = 紧随其后的第一个真实 EVM 兄弟帧 contextId（0 = 无）
+    const pendingInserts: Array<{ at: number; calltreeOrder: number; node: CallTreeNode }> = [];
+    let calltreeHelperOrder = 0;
+    for (const frame of frames) {
+        if (!frame.isVmHelper) continue;
+        const sk = frameScopeKeyFromFrame(frame);
+        if (seenScope.has(sk)) continue;
+        seenScope.add(sk);
+
+        const helperNode: CallTreeNode = {
+            id: 0, // 最后统一重编号
+            type: 'frame',
+            stepIndex: -1,
+            transactionId: frame.transactionId ?? 0,
+            contextId: frame.contextId,
+            depth: frame.depth,
+            callType: frame.callType,
+            address: frame.address,
+            caller: frame.caller,
+            target: frame.target,
+            value: frame.value,
+            success: frame.success,
+            gasUsed: frame.gasUsed,
+            vmHelperArgs: frame.vmHelperArgs,
+        };
+
+        const tid = frame.transactionId ?? 0;
+        let insertAt = nodes.length;
+
+        if (frame.vmInsertBeforeCtxId && frame.vmInsertBeforeCtxId > 0) {
+            // 插到下一个真实 EVM 兄弟帧的 frame node 之前
+            const beforeIdx = nodes.findIndex(
+                n => n.type === 'frame' && n.contextId === frame.vmInsertBeforeCtxId && (n.transactionId ?? 0) === tid
+            );
+            if (beforeIdx >= 0) insertAt = beforeIdx;
+        } else {
+            // 无后继真实兄弟：插到父帧子树末尾
+            const parentCtxId = frame.parentId;
+            if (parentCtxId != null && parentCtxId > 0) {
+                const parentIdx = nodes.findIndex(
+                    n => n.type === 'frame' && n.contextId === parentCtxId && (n.transactionId ?? 0) === tid
+                );
+                if (parentIdx >= 0) {
+                    const parentDepth = nodes[parentIdx].depth;
+                    let endIdx = parentIdx + 1;
+                    while (endIdx < nodes.length && nodes[endIdx].depth > parentDepth) endIdx++;
+                    insertAt = endIdx;
+                }
+            }
+        }
+
+        pendingInserts.push({ at: insertAt, calltreeOrder: calltreeHelperOrder++, node: helperNode });
+    }
+
+    pendingInserts.sort((a, b) => b.at - a.at || b.calltreeOrder - a.calltreeOrder);
+    for (const { at, node } of pendingInserts) {
+        nodes.splice(at, 0, node);
+    }
+    // 重编号 id（用作 React key）
+    nodes.forEach((n, i) => { n.id = i; });
 
     return nodes;
 }

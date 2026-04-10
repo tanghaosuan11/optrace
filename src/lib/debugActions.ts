@@ -1,4 +1,5 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { createPublicClient, http } from "viem";
 import { useDebugStore } from "@/store/debugStore";
 import { useForkStore } from "@/store/forkStore";
@@ -530,3 +531,57 @@ export function debugDump(
 
   console.groupEnd();
 }
+
+// ─── Foundry Debug ───────────────────────────────────────────────────────────
+
+export interface StartFoundryDebugDeps extends MessageHandlerContext {
+  sessionIdRef: React.RefObject<string>;
+  resetPlayback: () => void;
+  resetNav: () => void;
+  setCurrentStepIndex: (v: number) => void;
+  setIsPlaying: (v: boolean) => void;
+}
+
+/**
+ * 打开文件夹选择框，从选中的文件夹加载 Foundry dump 并流式调试。
+ * 依赖：文件夹中必须有 optrace_dump.json, optrace_calltree.json, out/
+ */
+export async function startFoundryDebugAction(deps: StartFoundryDebugDeps) {
+  const selected = await openDialog({ directory: true, multiple: false, title: "选择 Foundry 项目文件夹" });
+  if (!selected || typeof selected !== "string") return;
+
+  const folderPath = selected;
+
+  if (deps.runtime.startDebugInFlight || useDebugStore.getState().isDebugging) {
+    console.warn("[foundry] ignored duplicate start");
+    return;
+  }
+
+  deps.runtime.startDebugInFlight = true;
+  markDebugPerfStart(deps.runtime);
+  resetPendingFrameEnters(deps.runtime);
+  deps.setIsDebugging(true);
+
+  const { sync } = useDebugStore.getState();
+  sync({ isDebugging: true, stepCount: 0, callFrames: [] });
+
+  try {
+    const channel = new Channel();
+    channel.onmessage = (message: unknown) => {
+      handleMessage(message, deps);
+    };
+
+    await invoke("start_foundry_debug", { folderPath, sessionId: deps.sessionIdRef.current, channel });
+
+    const finalCount = deps.allStepsRef.current.length;
+    if (finalCount > 0) deps.setStepCount(finalCount);
+  } catch (error) {
+    console.error("[foundry] 调试失败:", error);
+    const msg = error instanceof Error ? error.message : String(error);
+    toast.error(msg || "Foundry debug failed");
+    deps.setIsDebugging(false);
+  } finally {
+    deps.runtime.startDebugInFlight = false;
+  }
+}
+

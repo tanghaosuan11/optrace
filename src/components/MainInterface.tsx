@@ -35,6 +35,7 @@ interface MainInterfaceProps {
   onSeekTo?: (index: number) => void;
   onSelectFrame?: (frameId: string) => void;
   onNavigateTo?: (stepIndex: number, frameId: string) => void;
+  onStartFoundryDebug?: () => void;
 }
 
 export function MainInterface({
@@ -45,6 +46,7 @@ export function MainInterface({
   onSeekTo,
   onSelectFrame,
   onNavigateTo,
+  onStartFoundryDebug,
 }: MainInterfaceProps) {
   const HARDFORK_OPTIONS = [
     "auto",
@@ -302,6 +304,19 @@ export function MainInterface({
           {config.isDebug && (
             <Button onClick={onOpenTestDialog} variant="outline" size="sm" className="whitespace-nowrap h-7 px-3 shrink-0">
               Test Parse
+            </Button>
+          )}
+          {onStartFoundryDebug && !hasSession && (
+            <Button
+              onClick={onStartFoundryDebug}
+              disabled={isDebugging}
+              variant="outline"
+              size="sm"
+              className="whitespace-nowrap h-7 px-3 shrink-0"
+              title="从 Foundry dump 文件夹加载调试会话"
+            >
+              <FolderOpen className="size-3.5 mr-1" />
+              Foundry
             </Button>
           )}
         </div>

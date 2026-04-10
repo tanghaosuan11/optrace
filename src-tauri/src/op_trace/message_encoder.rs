@@ -23,6 +23,7 @@ enum MsgType {
     BalanceChanges = 11,
     KeccakOp = 12,
     StateChange = 13,
+    FoundrySourceJson = 14,
     Finished = 255,
 }
 
@@ -31,11 +32,13 @@ enum MsgType {
 const STEP_BATCH_SIZE: usize = 800;
 
 /// 需要在 StepBatch 中携带栈顶 3 项的 opcode 集合
-const NEEDS_STACK: [u8; 10] = [
+const NEEDS_STACK: [u8; 13] = [
     0x20, // KECCAK256: offset, size
     0x54, // SLOAD
     0x55, // SSTORE
-    0xa1, 0xa2, 0xa3, 0xa4, // LOG1-LOG4
+    0x5c, // TLOAD
+    0x5d, // TSTORE
+    0xa0, 0xa1, 0xa2, 0xa3, 0xa4, // LOG0-LOG4
     0xf1, // CALL
     0xfa, // STATICCALL
     0xf4, // DELEGATECALL
@@ -362,6 +365,41 @@ impl MessageEncoder {
         packet.extend_from_slice(&step_index.to_be_bytes());
         packet.extend_from_slice(&transaction_id.to_be_bytes());
         packet.extend_from_slice(json.as_bytes());
+        let _ = self.channel.send(InvokeResponseBody::Raw(packet));
+    }
+
+    /// 发送预构建好的 Log JSON（用于 Foundry 模式，topics 来自 EVM 栈，data 为 emit 文本）
+    /// 布局与 send_logs 完全相同：`[type:1][context_id:2][step_index:8 BE][transaction_id:4 BE][json...]`
+    pub fn send_log_data(
+        &self,
+        context_id: u16,
+        step_index: usize,
+        transaction_id: u32,
+        log_json: &str,
+    ) {
+        let mut packet = Vec::with_capacity(1 + 2 + 8 + 4 + log_json.len());
+        packet.push(MsgType::Logs as u8);
+        packet.extend_from_slice(&context_id.to_be_bytes());
+        packet.extend_from_slice(&step_index.to_be_bytes());
+        packet.extend_from_slice(&transaction_id.to_be_bytes());
+        packet.extend_from_slice(log_json.as_bytes());
+        let _ = self.channel.send(InvokeResponseBody::Raw(packet));
+    }
+
+    /// 发送 FoundrySourceJson（Foundry 模式源码+sourcemap JSON，仅内存，不持久化）
+    /// 格式: [type:1] [transaction_id:4] [context_id:2] [json_len:4] [json_bytes]
+    pub fn send_foundry_source_json(
+        &self,
+        transaction_id: u32,
+        context_id: u16,
+        json_bytes: &[u8],
+    ) {
+        let mut packet = Vec::with_capacity(1 + 4 + 2 + 4 + json_bytes.len());
+        packet.push(MsgType::FoundrySourceJson as u8);
+        packet.extend_from_slice(&transaction_id.to_be_bytes());
+        packet.extend_from_slice(&context_id.to_be_bytes());
+        packet.extend_from_slice(&(json_bytes.len() as u32).to_be_bytes());
+        packet.extend_from_slice(json_bytes);
         let _ = self.channel.send(InvokeResponseBody::Raw(packet));
     }
 

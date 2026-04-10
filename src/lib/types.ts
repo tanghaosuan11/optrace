@@ -20,6 +20,7 @@ export enum MsgType {
     BalanceChanges = 11,
     KeccakOp = 12,
     StateChange = 13,
+    FoundrySourceJson = 14,
     Finished = 255,
 }
 
@@ -185,6 +186,14 @@ export interface CallFrame {
     selfdestructContract?: string;
     selfdestructTarget?: string;
     selfdestructValue?: string;
+    /** Foundry VM cheat code 帧（assertEq/prank 等），无 EVM 步骤 */
+    isVmHelper?: boolean;
+    /** VM cheat code 调用参数原始文本，如 `10000 [1e4], 10000 [1e4]` */
+    vmHelperArgs?: string;
+    /** VM helper 专用：calltree 中紧随其后的第一个真实 EVM 兄弟帧 contextId，前端据此精确插入 */
+    vmInsertBeforeCtxId?: number;
+    /** Foundry 模式：Sourcify 兼容的源码+sourcemap JSON，仅内存，不持久化到磁盘 */
+    foundrySourceJson?: string;
 }
 
 export type CallTreeNodeType = 'frame' | 'sload' | 'sstore' | 'tload' | 'tstore' | 'log' | 'keccak256';
@@ -222,6 +231,8 @@ export interface CallTreeNode {
     selfdestructContract?: string;
     selfdestructTarget?: string;
     selfdestructValue?: string;
+    /** VM helper 帧的参数原始文本 */
+    vmHelperArgs?: string;
 }
 
 /** KeccakOp 消息解析结果 */
