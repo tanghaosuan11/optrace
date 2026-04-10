@@ -67,7 +67,7 @@ OpTrace 支持直接可视化 Foundry 导出的测试执行 trace。
 **第一步 — 在 Foundry 项目根目录导出 trace：**
 
 ```bash
-forge test --debug --mp "test/**/**.t.sol" --match-test "<测试函数名>" -vvvv \
+forge test --debug --mp "test/**/**.t.sol" --match-test "<测试函数名>" -vvvvv \
   > ./optrace_calltree.json \
   --dump ./optrace_dump.json
 ```

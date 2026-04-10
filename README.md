@@ -67,7 +67,7 @@ OpTrace can visualize test execution traces exported from Foundry.
 **Step 1 — Export the trace from your project root:**
 
 ```bash
-forge test --debug --mp "test/**/**.t.sol" --match-test "<test_name>" -vvvv \
+forge test --debug --mp "test/**/**.t.sol" --match-test "<test_name>" -vvvvv \
   > ./optrace_calltree.json \
   --dump ./optrace_dump.json
 ```
